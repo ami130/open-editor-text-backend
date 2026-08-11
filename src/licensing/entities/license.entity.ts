@@ -129,6 +129,32 @@ export class LicenseEntity {
   @CreateDateColumn()
   createdAt!: Date;
 
+  /**
+   * A SANDBOX licence: real entitlements, no commercial meaning (§1.8).
+   *
+   * ─── WHY NOT REUSE `package.isFree` ─────────────────────────────────────
+   * They answer different questions. `isFree` is a STOREFRONT label — "this
+   * plan costs nothing" — and implies `priceCents = 0`. A test licence is the
+   * opposite shape: it grants a full PREMIUM package so staging exercises the
+   * real premium path, while never counting as revenue. Overloading `isFree`
+   * would both misreport the plan's price and quietly change free-tier logic.
+   *
+   * ─── WHAT IT IS FOR ─────────────────────────────────────────────────────
+   * §1.8 requires test licences that are "clearly marked and non-billable".
+   * Without a distinct flag, a licence issued to validate a staging deploy is
+   * indistinguishable from a paying customer's: it lands in revenue queries,
+   * cannot be swept before a billing reconciliation, and the admin UI cannot
+   * warn that it is not a real sale.
+   *
+   * ─── WHAT IT DELIBERATELY DOES NOT DO ───────────────────────────────────
+   * It does NOT change entitlement resolution. A test licence must behave
+   * EXACTLY like the real thing — same features, same channel rules, same
+   * expiry — or staging stops being a rehearsal for production, which is the
+   * entire reason it exists.
+   */
+  @Column({ type: 'boolean', default: false })
+  isTest!: boolean;
+
   // ── Runtime delivery: which engine BUILD this licence receives (§1.2) ─────
   // These are the first two steps of the four-step resolution chain
   // (pin → override → channel default → global default). Empty string means

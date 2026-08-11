@@ -151,6 +151,10 @@ export class LicenseAdminController {
       domains: l.domains,
       status: l.status,
       effectiveStatus: l.effectiveStatus(),
+      // §1.8 — so the UI can mark a sandbox licence and reporting can exclude
+      // it. Included in the allowlist deliberately: an unmarked test licence
+      // is indistinguishable from a real sale, which is the whole problem.
+      isTest: l.isTest,
       issuedAt: l.issuedAt,
       expiresAt: l.expiresAt,
       renewUntil: l.renewUntil,
@@ -169,7 +173,14 @@ export class LicenseAdminController {
 
   @Post() @RequirePermissions('license.issue')
   issue(@Body() dto: IssueLicenseDto) {
-    return this.licenses.issue({ customerId: dto.customerId, packageId: dto.packageId, domains: dto.domains, ttlSeconds: dto.ttlSeconds });
+    return this.licenses.issue({
+      customerId: dto.customerId,
+      packageId: dto.packageId,
+      domains: dto.domains,
+      ttlSeconds: dto.ttlSeconds,
+      // §1.8 — a sandbox licence: real entitlements, never revenue.
+      isTest: dto.isTest,
+    });
   }
 
   @Post(':id/renew') @RequirePermissions('license.renew')

@@ -588,6 +588,42 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(JSON.stringify(usage)).not.toMatch(/licenceKey|licenseKey/);
   });
 
+  it('§1.8: a TEST licence is marked, and behaves exactly like a real one', async () => {
+    // Staging needs licences that grant a full PREMIUM package (so it rehearses
+    // the real premium path) while never counting as revenue. package.isFree
+    // cannot express that — it means "this plan costs nothing" and implies
+    // priceCents = 0, which is the opposite shape.
+    const feat = 'export.pdf';
+    const pkg = await (await post('/admin/packages', {
+      name: 'Sandbox Pro', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['text.bold', feat], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Sandbox Co', email: 'sandbox@example.com',
+    }, adminToken)).json();
+
+    const real = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const test = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [], isTest: true,
+    }, adminToken)).json();
+
+    // Marked, and distinguishable in the listing — an unmarked test licence is
+    // indistinguishable from a real sale, which is the whole problem.
+    const listed = await (await get('/admin/licenses', adminToken)).json();
+    const byId = Object.fromEntries(listed.map((l: any) => [l.licId, l]));
+    expect(byId[test.licId].isTest).toBe(true);
+    expect(byId[real.licId].isTest).toBe(false);
+
+    // ⚠️ AND IT MUST CHANGE NOTHING ELSE. If a test licence resolved
+    // differently, staging would stop being a rehearsal for production.
+    const key = test.token || test.licenseKey || test.key;
+    const s = await (await post('/delivery/session', { licenceKey: key })).json();
+    expect(s.plan).toBe('premium');
+    expect(s.features).toContain(feat);
+  });
+
   it('DTO validation rejects a malformed publish payload', async () => {
     const r = await post('/admin/engine/versions', {
       ...buildPayload('1.9.0', 'free', 'not-a-sha'),

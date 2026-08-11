@@ -31,6 +31,12 @@ export interface IssueInput {
   domains?: string[];
   /** Override the package's default token TTL (seconds). */
   ttlSeconds?: number;
+  /**
+   * Mark this as a SANDBOX licence (§1.8): real entitlements, no commercial
+   * meaning. Deliberately does NOT alter what is granted — staging must
+   * rehearse the real premium path exactly, or it stops being a rehearsal.
+   */
+  isTest?: boolean;
 }
 
 export interface IssueFromSnapshotInput {
@@ -140,6 +146,7 @@ export class LicenseService {
       issuedAt: signed.iat,
       expiresAt: signed.exp,
       renewUntil,
+      isTest: input.isTest === true,
     });
     return this.licenses.save(record);
   }

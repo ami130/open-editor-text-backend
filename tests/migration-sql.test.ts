@@ -27,6 +27,7 @@ import 'reflect-metadata';
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { DataSource } from 'typeorm';
 import { AddEngineVersions1785433336198 } from '../src/migrations/1785433336198-AddEngineVersions';
+import { AddTestLicenceFlag1785533336198 } from '../src/migrations/1785533336198-AddTestLicenceFlag';
 
 const URL = process.env.TEST_MYSQL_URL;
 const describeIfMysql = URL ? describe : describe.skip;
@@ -154,6 +155,28 @@ describeIfMysql('delivery migration against REAL MySQL (G1)', () => {
     expect(row.channel).toBe('internal');               // default applied
     expect(row.status).toBe('published');
     await ds.query('DELETE FROM `engine_versions` WHERE `id` = ?', ['rt-1']);
+  }, 60_000);
+
+  it('§1.8: the test-licence flag migration runs, is idempotent, and defaults false', async () => {
+    // Same reasoning as every other migration here: production builds its
+    // schema from THIS SQL, while every other test builds it from entities.
+    const q = ds.createQueryRunner();
+    await new AddTestLicenceFlag1785533336198().up(q);
+    await new AddTestLicenceFlag1785533336198().up(q);   // idempotent
+    await q.release();
+
+    const [col] = await ds.query(
+      `SELECT COLUMN_NAME, COLUMN_DEFAULT, IS_NULLABLE FROM INFORMATION_SCHEMA.COLUMNS
+       WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'licenses' AND COLUMN_NAME = 'isTest'`,
+    );
+    expect(col).toBeTruthy();
+    expect(col.IS_NULLABLE).toBe('NO');
+    // Every EXISTING licence must remain a real one after the migration runs.
+    expect(String(col.COLUMN_DEFAULT)).toBe('0');
+
+    const q2 = ds.createQueryRunner();
+    await new AddTestLicenceFlag1785533336198().down(q2);
+    await q2.release();
   }, 60_000);
 
   it('down() removes what up() added, so a rollback is clean', async () => {
