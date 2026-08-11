@@ -13,10 +13,15 @@ import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
+import { json, urlencoded } from 'express';
 import { AppModule } from './app.module';
 import { loadAiConfig } from './config/ai.config';
 import { loadDatabaseConfig } from './config/database.config';
 import { loadAuthConfig } from './config/auth.config';
+import {
+  BUNDLE_UPLOAD_LIMIT, loadDeliveryConfig, deliveryInstanceCount,
+} from './config/delivery.config';
+import { isAbsolute } from 'node:path';
 
 async function bootstrap() {
   // rawBody:true makes Nest keep the unparsed request body on req.rawBody
@@ -48,6 +53,13 @@ async function bootstrap() {
   // Parse cookies (the auth refresh token rides in an httpOnly cookie).
   app.use(cookieParser());
 
+  // Body limit raised for engine bundle publishing (§1.4a). A ~640 KB bundle
+  // is ~854 KB base64, which Express's 100 KB default would reject with an
+  // opaque 413. Only the admin publish route needs this; the limit is kept
+  // tight enough that it is not a useful amplification target.
+  app.use(json({ limit: BUNDLE_UPLOAD_LIMIT }));
+  app.use(urlencoded({ extended: true, limit: BUNDLE_UPLOAD_LIMIT }));
+
   // NOTE: the global ValidationPipe is registered as an APP_PIPE provider in
   // SecurityModule (so prod + tests share the exact same validation, no drift).
 
@@ -70,6 +82,51 @@ async function bootstrap() {
     + (cfg.enabled ? '' : ' — WARNING: no AI key set, /api/ai will 503')
     + (db.enabled ? ` — DB: ${db.host}:${db.port}/${db.database}` : ' — DB: disabled'),
   );
+
+  /**
+   * Delivery misconfiguration is uniquely nasty: it breaks premium ONLY.
+   * Free sessions keep working, so a deploy smoke-test passes while every
+   * paying customer gets a 503 — and the first report comes from them, not us.
+   * Say it at boot, where it is cheap to notice.
+   */
+  const delivery = loadDeliveryConfig();
+
+  /**
+   * REFUSE to start on a multi-instance deployment (G2).
+   *
+   * Local-disk bundle storage is per-instance: publishing writes the bytes to
+   * whichever server handled the request, so with N instances roughly (N-1)/N
+   * of engine downloads 404 — at random, per server, with nothing in the logs
+   * to explain it. A comment in the driver could not prevent that; this can.
+   */
+  if (db.enabled && deliveryInstanceCount() > 1) {
+    // eslint-disable-next-line no-console
+    console.error(
+      `[open-editor backend] FATAL: DELIVERY_INSTANCES=${deliveryInstanceCount()} but engine `
+      + 'bundles are stored on LOCAL DISK, which is per-instance. Each server would hold only '
+      + 'part of the set and engine downloads would 404 at random. Use shared storage '
+      + '(Phase 2 object storage), or run a single instance.',
+    );
+    process.exit(1);
+  }
+
+  if (db.enabled && !delivery.signingEnabled) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      '[open-editor backend] WARNING: DELIVERY_URL_SECRET is not set — premium '
+      + 'engine delivery will fail with 503 for every LICENSED customer. Free '
+      + 'sessions are unaffected, so this will not show up in a basic smoke test. '
+      + 'Generate one with: openssl rand -hex 32',
+    );
+  }
+  if (db.enabled && !isAbsolute(delivery.bundleDir)) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[open-editor backend] WARNING: DELIVERY_BUNDLE_DIR is relative ("${delivery.bundleDir}") `
+      + `— bundles resolve against the current working directory (${process.cwd()}). `
+      + 'Set an absolute path on a persistent volume, or a redeploy will lose every bundle.',
+    );
+  }
 }
 
 bootstrap();

@@ -129,6 +129,44 @@ export class LicenseEntity {
   @CreateDateColumn()
   createdAt!: Date;
 
+  // ── Runtime delivery: which engine BUILD this licence receives (§1.2) ─────
+  // These are the first two steps of the four-step resolution chain
+  // (pin → override → channel default → global default). Empty string means
+  // "not set", so the chain falls through to the next step.
+
+  /**
+   * The customer's explicit version pin. ABSOLUTE: a pinned licence is never
+   * moved by a new default, a channel promotion, a canary rollout, OR a
+   * rollback. Pinning is a promise — breaking it once destroys trust in the
+   * feature permanently, which is why it is checked before the admin override.
+   */
+  @Column({ type: 'varchar', length: 32, default: '' })
+  pinnedVersion!: string;
+
+  /** Admin "switch this one customer" — e.g. move them off a bad build. */
+  @Column({ type: 'varchar', length: 32, default: '' })
+  overrideVersion!: string;
+
+  /**
+   * Why the override exists. MANDATORY when overrideVersion is set: an
+   * unexplained override rots — someone is moved back to dodge a bug, then
+   * forgotten for years, quietly missing features they pay for.
+   */
+  @Column({ type: 'varchar', length: 300, default: '' })
+  overrideReason!: string;
+
+  /** Unix seconds when the override should be reviewed; 0 = never set. */
+  @Column({ type: 'int', default: 0 })
+  overrideReviewAt!: number;
+
+  /**
+   * Opt-in release channel: 'stable' | 'beta' | 'internal'. Leaving beta does
+   * NOT auto-downgrade (T15) — content written by a newer engine may not open
+   * in an older one, so the customer is held until stable catches up.
+   */
+  @Column({ type: 'varchar', length: 16, default: 'stable' })
+  channel!: string;
+
   @UpdateDateColumn()
   updatedAt!: Date;
 

@@ -27,6 +27,16 @@ export const PERMISSION_CATALOG: PermissionDef[] = [
   { key: 'license.revoke', description: 'Revoke licenses' },
   // Features catalog (read-only surface)
   { key: 'feature.read', description: 'View the feature catalog' },
+  // Runtime engine delivery (§1.2). Publishing and promoting are separated from
+  // setting a default on purpose: publishing is routine, but moving the default
+  // pointer is what every customer actually receives — and is also the rollback
+  // control. They deserve different levels of trust.
+  { key: 'engine.read', description: 'View engine versions and defaults' },
+  { key: 'engine.publish', description: 'Publish an engine build' },
+  { key: 'engine.promote', description: 'Promote a version between channels' },
+  { key: 'engine.default', description: 'Set the default version (also the rollback control)' },
+  { key: 'engine.retire', description: 'Retire an engine version' },
+  { key: 'engine.override', description: 'Pin or override a single licence\'s version' },
   // Orders (billing purchases — read-only admin surface)
   { key: 'order.read', description: 'View purchase orders' },
   // Admin user/role management

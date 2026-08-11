@@ -14,12 +14,24 @@ import { LicenseSignerService } from './license-signer.service';
 import { JwksController } from './jwks.controller';
 import { LicenseService } from './license.service';
 import { FeatureCatalogService } from './feature-catalog.service';
+import { EngineVersionService } from './engine-version.service';
 import { FeatureEntity } from './entities/feature.entity';
 import { PackageEntity } from './entities/package.entity';
 import { CustomerEntity } from './entities/customer.entity';
 import { LicenseEntity } from './entities/license.entity';
+import { EngineVersionEntity } from './entities/engine-version.entity';
+import { EngineDefaultEntity } from './entities/engine-default.entity';
+import {
+  DELIVERY_CONFIG, DeliveryConfig, loadDeliveryConfig,
+} from '../config/delivery.config';
+import { BUNDLE_STORAGE } from '../delivery/bundle-storage';
+import { LocalBundleStorage } from '../delivery/local-bundle-storage';
 
-const ENTITIES = [FeatureEntity, PackageEntity, CustomerEntity, LicenseEntity];
+const ENTITIES = [
+  FeatureEntity, PackageEntity, CustomerEntity, LicenseEntity,
+  // Runtime delivery §1.2 — the engine version registry + default pointers.
+  EngineVersionEntity, EngineDefaultEntity,
+];
 
 // @Global so LicenseService/LicenseSignerService are visible app-wide from a
 // SINGLE forRoot() import (in app.module). AdminModule then consumes them
@@ -40,7 +52,18 @@ export class LicensingModule {
 
     if (dbEnabled) {
       imports.push(TypeOrmModule.forFeature(ENTITIES));
-      providers.push(LicenseService, FeatureCatalogService);
+      providers.push(LicenseService, FeatureCatalogService, EngineVersionService);
+      // Bundle storage (§1.4a) is provided HERE rather than in DeliveryModule
+      // because EngineVersionService lives in this module and injects it. A
+      // provider registered in DeliveryModule would not be visible to it.
+      providers.push(
+        { provide: DELIVERY_CONFIG, useFactory: () => loadDeliveryConfig() },
+        {
+          provide: BUNDLE_STORAGE,
+          useFactory: (cfg: DeliveryConfig) => new LocalBundleStorage(cfg.bundleDir),
+          inject: [DELIVERY_CONFIG],
+        },
+      );
     }
 
     return {
@@ -48,7 +71,16 @@ export class LicensingModule {
       imports,
       controllers,
       providers,
-      exports: [LicenseSignerService, ...(dbEnabled ? [LicenseService, FeatureCatalogService] : [])],
+      exports: [
+        LicenseSignerService,
+        ...(dbEnabled
+          ? [
+            LicenseService, FeatureCatalogService, EngineVersionService,
+            // Exported so the engine endpoint and its URL signer can inject them.
+            DELIVERY_CONFIG, BUNDLE_STORAGE,
+          ]
+          : []),
+      ],
     };
   }
 }

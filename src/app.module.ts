@@ -20,6 +20,7 @@ import { AuthModule } from './auth/auth.module';
 import { AdminModule } from './admin/admin.module';
 import { BillingModule } from './billing/billing.module';
 import { PortalModule } from './portal/portal.module';
+import { DeliveryModule } from './delivery/delivery.module';
 import { SecurityModule } from './auth/security.module';
 import { ObservabilityModule } from './observability/observability.module';
 import { loadDatabaseConfig } from './config/database.config';
@@ -43,7 +44,7 @@ export class AppModule {
       HealthModule,
       AiModule,
       LicensingModule.forRoot(),  // @Global — single import; providers visible app-wide
-      ...(dbEnabled ? [AuthModule.forRoot(), AdminModule.forRoot(), BillingModule.forRoot(), PortalModule.forRoot()] : []),
+      ...(dbEnabled ? [AuthModule.forRoot(), AdminModule.forRoot(), BillingModule.forRoot(), PortalModule.forRoot(), DeliveryModule.forRoot()] : []),
     ];
     return { module: AppModule, imports };
   }

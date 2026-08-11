@@ -35,6 +35,23 @@ export interface LicensePayloadInput {
   plan?: string;
   limits?: Record<string, number>;
   ttlSeconds?: number;
+  /**
+   * Engine version this token is scoped to (delivery §1.3, risk R40).
+   *
+   * OPTIONAL AND ADDITIVE. Portal licences carry no version and must keep
+   * verifying exactly as before, so the claim is omitted entirely when unset
+   * rather than written as null — a missing claim means "not a delivery
+   * session", never a failure.
+   *
+   * Safe to add: the editor's offline verifier checks only that the REQUIRED
+   * fields are present and well-formed (isPayloadShapeValid), so unknown claims
+   * pass through untouched. Verified against the verifier before relying on it.
+   *
+   * Must always be set from the version §1.2 actually RESOLVED — never from
+   * anything the client supplied, or the claim would attest to the caller's own
+   * request rather than our decision.
+   */
+  version?: string | null;
   /** issued-at override (unix seconds); default now. */
   iat?: number;
   /**
@@ -89,6 +106,10 @@ export class LicenseSignerService {
       limits: input.limits || {},
       iat,
       exp,
+      // Delivery sessions only (R40). Spread so the key is ABSENT rather than
+      // null on portal licences, keeping their payload byte-identical to what
+      // it was before this claim existed.
+      ...(input.version ? { version: input.version } : {}),
     };
 
     const signingInput = `${b64url(JSON.stringify(header))}.${b64url(JSON.stringify(payload))}`;

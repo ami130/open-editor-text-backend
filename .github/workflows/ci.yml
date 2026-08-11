@@ -1,0 +1,77 @@
+# CI for open-editor-backend (gap G5).
+#
+# The backend had no workflow at all: 403 tests only ever ran on one laptop.
+# This runs them on every push, and — crucially — runs the MIGRATION tests
+# against a REAL MySQL service, which is the one thing local sqljs runs cannot
+# cover (see tests/migration-sql.test.ts).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      # Production builds its schema from migration files against MySQL, while
+      # every other test uses sqljs + synchronize. Without a real MySQL here,
+      # the migration SQL would remain unexecuted until the first deploy.
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ALLOW_EMPTY_PASSWORD: 'yes'
+          MYSQL_DATABASE: oe_migration_test
+        ports: ['3306:3306']
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # `licenses` must exist before the delivery migration adds columns to it.
+      # Created directly rather than by running the whole migration chain, so a
+      # failure here is unambiguously about the delivery migration.
+      - name: Prepare migration-test schema
+        run: |
+          mysql -h 127.0.0.1 -u root oe_migration_test \
+            -e "CREATE TABLE IF NOT EXISTS licenses (id varchar(36) PRIMARY KEY)"
+
+      - name: Test
+        env:
+          # Enables tests/migration-sql.test.ts. Without it those tests SKIP —
+          # loudly, but they skip, so CI must always set this.
+          TEST_MYSQL_URL: mysql://root@127.0.0.1:3306/oe_migration_test
+        run: npx vitest run
+
+      # A skipped migration suite in CI would silently restore the exact blind
+      # spot G1 closed, so assert it actually ran.
+      - name: Assert migration tests were NOT skipped
+        env:
+          TEST_MYSQL_URL: mysql://root@127.0.0.1:3306/oe_migration_test
+        run: |
+          npx vitest run tests/migration-sql.test.ts --reporter=json > /tmp/mig.json
+          node -e "
+            const r = require('/tmp/mig.json');
+            if (!r.numTotalTests || r.numPassedTests < r.numTotalTests) {
+              console.error('migration SQL tests did not all run/pass');
+              process.exit(1);
+            }
+            console.log('migration SQL tests ran:', r.numPassedTests);
+          "

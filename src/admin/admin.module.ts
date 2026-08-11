@@ -15,6 +15,7 @@ import { RoleEntity } from '../auth/entities/role.entity';
 import { PermissionEntity } from '../auth/entities/permission.entity';
 import { PackageAdminService } from './package-admin.service';
 import { RbacService } from './rbac.service';
+import { EngineAdminController } from './engine-admin.controller';
 import {
   FeatureAdminController, PackageAdminController, CustomerAdminController, LicenseAdminController,
   PermissionAdminController, RoleAdminController, UserAdminController,
@@ -38,6 +39,8 @@ export class AdminModule {
       controllers: [
         FeatureAdminController, PackageAdminController, CustomerAdminController, LicenseAdminController,
         PermissionAdminController, RoleAdminController, UserAdminController,
+        // Runtime delivery §1.2 — publish/promote/default/retire engine versions.
+        EngineAdminController,
       ],
       providers: [PackageAdminService, RbacService],
     };
