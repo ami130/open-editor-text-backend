@@ -96,7 +96,14 @@ function isPlatformInternalHost(host: string): boolean {
   return h.endsWith('.railway.internal')
     || h.endsWith('.internal')
     || h.endsWith('.flycast')
-    || h.endsWith('.render.com');
+    || h.endsWith('.render.com')
+    // Railway's PUBLIC TCP proxy. Not a private network, but still a
+    // platform-managed database whose only user is root — the operator has no
+    // way to comply with the rule, so refusing merely blocks them. TLS is NOT
+    // waived for these (that check is separate and still applies), so the
+    // connection is still required to be encrypted or explicitly opted out of.
+    || h.endsWith('.proxy.rlwy.net')
+    || h.endsWith('.railway.app');
 }
 
 /** Read + normalize DB config from env. Pure; no connection made here. */
@@ -121,14 +128,34 @@ export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Databa
     if (password.trim() === '') {
       throw new Error('DB_PASSWORD must be set in production (empty DB password is not allowed).');
     }
-    // Root is refused in production — EXCEPT on a platform-managed database
-    // reachable only on a private network, where the platform provides no other
-    // user. See isPlatformInternalHost: the rule exists to stop a root
-    // credential being exposed publicly, and that risk is absent there.
-    if (username === 'root' && !isPlatformInternalHost(env.DB_HOST || url?.host || '')) {
+    /**
+     * Root is refused in production, with two escapes:
+     *
+     *   1. a platform-managed PRIVATE host (see isPlatformInternalHost) — the
+     *      risk this rule guards against, a root credential reachable from the
+     *      internet, does not exist there; and
+     *   2. an EXPLICIT opt-out, DB_ALLOW_ROOT=true.
+     *
+     * (2) exists because managed platforms frequently provide ONLY a root user.
+     * Railway's MySQL does. Without an escape hatch the rule is not a guard, it
+     * is a wall: the operator cannot comply no matter what they do, and their
+     * only remaining option is to stop using the product.
+     *
+     * Note this mirrors DB_SSL_ALLOW_PLAINTEXT, which already exists for
+     * exactly the same reason. Shipping one rule with an opt-out and the other
+     * without was an inconsistency on my part, found when a real deploy hit it.
+     *
+     * Deliberately opt-IN and named plainly, so it appears in a config review
+     * and cannot be set by accident.
+     */
+    const allowRoot = parseBoolDefault(env.DB_ALLOW_ROOT, false);
+    if (username === 'root'
+      && !allowRoot
+      && !isPlatformInternalHost(env.DB_HOST || url?.host || '')) {
       throw new Error(
         'DB_USERNAME must not be "root" in production — use a least-privilege DB user. '
-        + '(Allowed only on a platform-managed private host, e.g. *.railway.internal.)',
+        + 'Allowed automatically on a platform-managed private host (e.g. *.railway.internal); '
+        + 'otherwise set DB_ALLOW_ROOT=true to accept the risk explicitly.',
       );
     }
     // TLS is required in production — EXCEPT on a platform-managed private
@@ -139,8 +166,15 @@ export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Databa
     // (credentials crossing a public network in plaintext) does not apply.
     //
     // Any OTHER host still requires TLS or an explicit opt-out.
-    const dbHost = env.DB_HOST || url?.host || '';
-    if (!sslOn && !allowPlaintext && !isPlatformInternalHost(dbHost)) {
+    const dbHost = (env.DB_HOST || url?.host || '').toLowerCase();
+    // ⚠️ PRIVATE hosts only — deliberately NOT isPlatformInternalHost(), which
+    // now also matches Railway's PUBLIC proxy. Traffic to a public proxy really
+    // does cross the internet, so plaintext there must stay an explicit,
+    // reviewed decision (DB_SSL_ALLOW_PLAINTEXT) rather than a silent default.
+    const privateHost = dbHost.endsWith('.railway.internal')
+      || dbHost.endsWith('.internal')
+      || dbHost.endsWith('.flycast');
+    if (!sslOn && !allowPlaintext && !privateHost) {
       throw new Error('DB TLS is required in production: set DB_SSL=true (recommended) or DB_SSL_ALLOW_PLAINTEXT=true only for a same-host/socket DB.');
     }
   }

@@ -120,6 +120,37 @@ describe('database config — the root rule', () => {
     })).toThrow(/TLS is required/i);
   });
 
+  it('ALLOWS root on Railway\'s PUBLIC proxy — the platform provides no other user', () => {
+    // Refusing here is not a guard, it is a wall: the operator cannot comply
+    // no matter what they do. Found when a real deploy hit it.
+    const cfg = loadDatabaseConfig({
+      ...base,
+      MYSQL_URL: 'mysql://root:pw@monorail.proxy.rlwy.net:41234/railway',
+      DB_SSL_ALLOW_PLAINTEXT: 'true',
+    });
+    expect(cfg.username).toBe('root');
+  });
+
+  it('DB_ALLOW_ROOT=true is an explicit escape for any other host', () => {
+    const cfg = loadDatabaseConfig({
+      ...base,
+      DB_HOST: 'db.example.com', DB_USERNAME: 'root', DB_PASSWORD: 'pw',
+      DB_ALLOW_ROOT: 'true', DB_SSL_ALLOW_PLAINTEXT: 'true',
+    });
+    expect(cfg.username).toBe('root');
+  });
+
+  it('the TLS rule did NOT widen with the root rule', () => {
+    // Railway's public proxy is exempt from the ROOT check but NOT from TLS:
+    // that traffic really does cross the internet, so plaintext must stay an
+    // explicit decision rather than a silent default.
+    expect(() => loadDatabaseConfig({
+      ...base,
+      MYSQL_URL: 'mysql://root:pw@monorail.proxy.rlwy.net:41234/railway',
+      // no DB_SSL_ALLOW_PLAINTEXT
+    })).toThrow(/TLS is required/i);
+  });
+
   it('still refuses an empty password in production', () => {
     expect(() => loadDatabaseConfig({
       ...base,
