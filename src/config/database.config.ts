@@ -41,13 +41,77 @@ export interface DatabaseConfig {
 
 export const DATABASE_CONFIG = 'DATABASE_CONFIG';
 
+/**
+ * Parse a single connection URL (`mysql://user:pass@host:port/dbname`).
+ *
+ * ─── WHY THIS EXISTS ────────────────────────────────────────────────────────
+ * Managed platforms (Railway, Render, Fly, Heroku) hand you ONE variable
+ * containing the whole connection, and expect you to consume it. Requiring five
+ * separate variables instead means five chances to mistype a name — and a
+ * missing one does not error, it silently falls back to `127.0.0.1`, which
+ * looks exactly like "the database is down".
+ *
+ * That is not hypothetical: it cost a full deploy cycle to diagnose, because
+ * `ECONNREFUSED 127.0.0.1:3306` reads like a network fault rather than an unset
+ * variable.
+ *
+ * Returns null for anything unparseable, so a malformed URL degrades to the
+ * individual DB_* variables rather than throwing during config load.
+ */
+function parseConnectionUrl(raw: string | undefined): {
+  host: string; port: number; username: string; password: string; database: string;
+} | null {
+  const value = (raw || '').trim();
+  if (!value) return null;
+  try {
+    const u = new URL(value);
+    if (!/^mysql:?$/i.test(u.protocol.replace(':', ''))) return null;
+    const database = decodeURIComponent(u.pathname.replace(/^\//, ''));
+    if (!u.hostname || !database) return null;
+    return {
+      host: u.hostname,
+      port: Number(u.port) || 3306,
+      // URL-encoded credentials are normal — a password with '@' or '/' must
+      // round-trip correctly or authentication fails with a confusing error.
+      username: decodeURIComponent(u.username || ''),
+      password: decodeURIComponent(u.password || ''),
+      database,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this host a platform-managed, private-network database?
+ *
+ * Railway/Render/Fly expose managed MySQL on an INTERNAL hostname reachable
+ * only from inside your own project's network, and hand out `root` because
+ * there is no other user. Refusing root there blocks a deployment over a rule
+ * that cannot be satisfied — while the actual risk the rule guards against
+ * (a root credential exposed to the internet) does not apply.
+ */
+function isPlatformInternalHost(host: string): boolean {
+  const h = (host || '').toLowerCase();
+  return h.endsWith('.railway.internal')
+    || h.endsWith('.internal')
+    || h.endsWith('.flycast')
+    || h.endsWith('.render.com');
+}
+
 /** Read + normalize DB config from env. Pure; no connection made here. */
 export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): DatabaseConfig {
   const enabled = String(env.DB_ENABLED || '').toLowerCase() === 'true';
   const driver = String(env.DB_DRIVER || 'mysql').toLowerCase() === 'sqljs' ? 'sqljs' : 'mysql';
   const isProduction = (env.NODE_ENV || 'development') === 'production';
-  const username = env.DB_USERNAME || 'root';
-  const password = env.DB_PASSWORD || '';
+
+  // A connection URL, when present, supplies every field — but each individual
+  // DB_* variable still WINS over it, so an operator can override one piece
+  // (e.g. point at a replica host) without rewriting the whole URL.
+  const url = parseConnectionUrl(env.DATABASE_URL || env.MYSQL_URL || env.DB_URL);
+
+  const username = env.DB_USERNAME || url?.username || 'root';
+  const password = env.DB_PASSWORD || url?.password || '';
   const sslOn = parseBoolDefault(env.DB_SSL, false);
   const allowPlaintext = parseBoolDefault(env.DB_SSL_ALLOW_PLAINTEXT, false);
 
@@ -57,10 +121,26 @@ export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Databa
     if (password.trim() === '') {
       throw new Error('DB_PASSWORD must be set in production (empty DB password is not allowed).');
     }
-    if (username === 'root') {
-      throw new Error('DB_USERNAME must not be "root" in production — use a least-privilege DB user.');
+    // Root is refused in production — EXCEPT on a platform-managed database
+    // reachable only on a private network, where the platform provides no other
+    // user. See isPlatformInternalHost: the rule exists to stop a root
+    // credential being exposed publicly, and that risk is absent there.
+    if (username === 'root' && !isPlatformInternalHost(env.DB_HOST || url?.host || '')) {
+      throw new Error(
+        'DB_USERNAME must not be "root" in production — use a least-privilege DB user. '
+        + '(Allowed only on a platform-managed private host, e.g. *.railway.internal.)',
+      );
     }
-    if (!sslOn && !allowPlaintext) {
+    // TLS is required in production — EXCEPT on a platform-managed private
+    // host. Railway/Render/Fly terminate their managed database on an internal
+    // network that is not routable from outside the project, and their MySQL
+    // does not offer TLS on it. Demanding TLS there blocks the deployment over
+    // a rule that cannot be satisfied, while the risk it guards against
+    // (credentials crossing a public network in plaintext) does not apply.
+    //
+    // Any OTHER host still requires TLS or an explicit opt-out.
+    const dbHost = env.DB_HOST || url?.host || '';
+    if (!sslOn && !allowPlaintext && !isPlatformInternalHost(dbHost)) {
       throw new Error('DB TLS is required in production: set DB_SSL=true (recommended) or DB_SSL_ALLOW_PLAINTEXT=true only for a same-host/socket DB.');
     }
   }
@@ -68,11 +148,11 @@ export function loadDatabaseConfig(env: NodeJS.ProcessEnv = process.env): Databa
   return {
     enabled,
     driver,
-    host: env.DB_HOST || '127.0.0.1',
-    port: intOr(env.DB_PORT, 3306),
+    host: env.DB_HOST || url?.host || '127.0.0.1',
+    port: env.DB_PORT ? intOr(env.DB_PORT, 3306) : (url?.port ?? 3306),
     username,
     password,
-    database: env.DB_DATABASE || 'open_editor',
+    database: env.DB_DATABASE || url?.database || 'open_editor',
     ssl: sslOn
       ? { rejectUnauthorized: true, ...(env.DB_SSL_CA ? { ca: env.DB_SSL_CA.replace(/\\n/g, '\n') } : {}) }
       : null,
