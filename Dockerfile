@@ -23,6 +23,19 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 
+# ─── PERSISTENT STORAGE ─────────────────────────────────────────────────────
+# Engine bundles are written to DELIVERY_BUNDLE_DIR (a mounted volume in
+# production). Platforms mount volumes owned by ROOT, while this image runs as
+# the non-root `node` user — so without this the very first write fails with
+# EACCES and every bundle publish returns a 500.
+#
+# Creating the directory here and chowning it means the mount point already
+# exists with the right owner when the volume is attached. Proven the hard way:
+# a 1-byte upload failed identically to a 600 KB one, which ruled out size and
+# pointed straight at permissions.
+RUN mkdir -p /data/bundles && chown -R node:node /data
+VOLUME ["/data"]
+
 # Run as the built-in non-root `node` user.
 USER node
 
