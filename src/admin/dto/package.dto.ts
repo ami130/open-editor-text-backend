@@ -46,6 +46,13 @@ export class CreatePackageDto {
   maxDomains?: number;
 
   /**
+   * Distinct browser installs one licence may serve (§2.4). 0 = unlimited.
+   * Closes the unbounded `localhost` exemption in domain binding.
+   */
+  @IsOptional() @IsInt() @Min(0) @Max(10_000)
+  maxInstalls?: number;
+
+  /**
    * Explicit TTL override (seconds). Omit/null (normal) → the license TTL is
    * DERIVED from billingInterval via durationPolicy(). When set, it wins over the
    * derived value. This is the SINGLE explicit-TTL knob (the legacy
@@ -91,6 +98,8 @@ export class UpdatePackageDto {
   @IsOptional() @IsBoolean() domainBound?: boolean;
   /** Domains one licence may bind; 0 = unlimited (§2 security). */
   @IsOptional() @IsInt() @Min(0) @Max(1000) maxDomains?: number;
+  /** Distinct installs one licence may serve; 0 = unlimited (§2.4). */
+  @IsOptional() @IsInt() @Min(0) @Max(10_000) maxInstalls?: number;
   @IsOptional() @IsInt() @Min(3600) @Max(95_000_000) ttlOverrideSeconds?: number;
   @IsOptional() @IsBoolean() isFree?: boolean;
   @IsOptional() @IsBoolean() active?: boolean;

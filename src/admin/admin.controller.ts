@@ -5,7 +5,7 @@
  * licenses (issue/renew/revoke/list).
  */
 import {
-  Controller, Get, Post, Patch, Delete, Body, Param, Query, Inject, NotFoundException,
+  Controller, Get, Post, Patch, Delete, Body, Param, Query, Inject, Optional, NotFoundException,
   BadRequestException,
 } from '@nestjs/common';
 import { Repository } from 'typeorm';
@@ -23,6 +23,7 @@ import { CreateCustomerDto, UpdateCustomerDto } from './dto/customer.dto';
 import { IssueLicenseDto, RenewLicenseDto } from './dto/license.dto';
 import { CreateRoleDto, UpdateRoleDto } from './dto/role.dto';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
+import { LicenseInstallService } from '../delivery/license-install.service';
 
 @Controller('admin/features')
 export class FeatureAdminController {
@@ -121,7 +122,12 @@ export class CustomerAdminController {
 
 @Controller('admin/licenses')
 export class LicenseAdminController {
-  constructor(@Inject(LicenseService) private readonly licenses: LicenseService) {}
+  constructor(
+    @Inject(LicenseService) private readonly licenses: LicenseService,
+    // @Optional: a deployment without the delivery module still serves every
+    // other licence route; the seat endpoints simply report nothing.
+    @Optional() @Inject(LicenseInstallService) private readonly installsSvc?: LicenseInstallService,
+  ) {}
 
   /**
    * `?q=` matches customer name/email or plan name (pushed into the DB
@@ -203,6 +209,37 @@ export class LicenseAdminController {
    */
   @Post(':id/regenerate') @RequirePermissions('license.revoke', 'license.issue')
   regenerate(@Param('id') id: string) { return this.licenses.regenerate(id); }
+
+  /**
+   * Seats (§2.4) — which browser installs have used this licence.
+   *
+   * This is the support view behind the install cap. Without it the cap is
+   * unarguable: a customer says "I only use two machines", and there is no way
+   * to check. `blocked: true` rows are the ones that were turned away, so a
+   * genuine multi-machine customer is visible and can be upgraded rather than
+   * argued with.
+   */
+  @Get(':id/installs') @RequirePermissions('license.read')
+  installs(@Param('id') id: string) {
+    if (!this.installsSvc) return [];
+    return this.installsSvc.listForLicence(id);
+  }
+
+  /**
+   * Release a seat — the recovery path for "I cleared my browser" or "I
+   * replaced my laptop". Without this, an install id lost to cleared storage
+   * would consume a seat forever and the cap would slowly strangle a paying
+   * customer. Deleting rather than flagging keeps the count honest.
+   *
+   * Requires license.update: it changes what the customer may do, so it is a
+   * mutation, not a read.
+   */
+  @Delete(':id/installs/:installId') @RequirePermissions('license.update')
+  async releaseInstall(@Param('id') id: string, @Param('installId') installId: string) {
+    if (!this.installsSvc) return { ok: false, released: false };
+    const released = await this.installsSvc.release(id, installId);
+    return { ok: true, released };
+  }
 }
 
 @Controller('admin/permissions')

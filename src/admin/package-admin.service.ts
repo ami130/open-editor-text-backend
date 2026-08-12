@@ -42,6 +42,7 @@ export class PackageAdminService {
       domainBound: dto.domainBound ?? true,
       // 0 = unlimited, so an omitted value keeps existing behaviour (§2 security).
       maxDomains: dto.maxDomains ?? 0,
+      maxInstalls: dto.maxInstalls ?? 0,
       // licenseTtlSeconds is retired from the write path (inert on issue — the TTL
       // is derived from the interval, or from ttlOverrideSeconds). The DB column
       // keeps its NOT-NULL default; nothing reads it. See duration-policy.ts.
@@ -64,6 +65,7 @@ export class PackageAdminService {
     if (dto.isFree !== undefined) pkg.isFree = dto.isFree;
     if (dto.domainBound !== undefined) pkg.domainBound = dto.domainBound;
     if (dto.maxDomains !== undefined) pkg.maxDomains = dto.maxDomains;
+    if (dto.maxInstalls !== undefined) pkg.maxInstalls = dto.maxInstalls;
     if (dto.ttlOverrideSeconds !== undefined) pkg.ttlOverrideSeconds = dto.ttlOverrideSeconds;
     if (dto.active !== undefined) pkg.active = dto.active;
     if (dto.publiclyListed !== undefined) pkg.publiclyListed = dto.publiclyListed;

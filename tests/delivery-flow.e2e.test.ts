@@ -669,6 +669,115 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect((await two.json()).message).toMatch(/allows 1 domain/i);
   });
 
+  it('SECURITY §2.4: a licence serves only its capped number of INSTALLS', async () => {
+    // THE HOLE THIS CLOSES: domain binding exempts `localhost` so developers can
+    // build without owning the customer's domain — but that exemption has no
+    // ceiling. One key in a group chat works on unlimited local machines and the
+    // domain gate never fires, because none of them are on a domain.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Two Seats', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false, maxInstalls: 2,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Seat Co', email: 'seats@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    // Two distinct machines — both within the cap, both premium.
+    const a = await (await post('/delivery/session', { licenceKey: key, installId: `oe_${'a'.repeat(32)}` })).json();
+    const b = await (await post('/delivery/session', { licenceKey: key, installId: `oe_${'b'.repeat(32)}` })).json();
+    expect(a.plan).toBe('premium');
+    expect(b.plan).toBe('premium');
+
+    // The THIRD machine is over the cap → free, not premium.
+    const c = await (await post('/delivery/session', { licenceKey: key, installId: `oe_${'c'.repeat(32)}` })).json();
+    expect(c.plan).toBe('free');
+    // …but it is still a WORKING editor, never a dead end or an error.
+    expect(c.sessionToken).toBeTruthy();
+    // And it must not reveal WHY — /session is not a key-validation oracle.
+    expect(JSON.stringify(c)).not.toMatch(/cap|install|refus|blocked/i);
+  });
+
+  it('SECURITY §2.4: a KNOWN install keeps working — a payer is never locked out', async () => {
+    // The asymmetry is the whole design. An install id lives in localStorage;
+    // if seats could be lost, a paying customer who cleared their browser (or
+    // whose cap was later lowered) would lose the product they paid for. That
+    // is worse than the sharing it would prevent.
+    const pkg = await (await post('/admin/packages', {
+      name: 'One Seat', priceCents: 4900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false, maxInstalls: 1,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Loyal Co', email: 'loyal@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+    const mine = `oe_${'1'.repeat(32)}`;
+
+    expect((await (await post('/delivery/session', { licenceKey: key, installId: mine })).json()).plan)
+      .toBe('premium');
+
+    // A DIFFERENT machine is refused (cap of 1 is already taken)…
+    expect((await (await post('/delivery/session', { licenceKey: key, installId: `oe_${'2'.repeat(32)}` })).json()).plan)
+      .toBe('free');
+
+    // …and the ORIGINAL machine still works, repeatedly. If the refused install
+    // had consumed or reset the seat, this would now be free.
+    for (let i = 0; i < 3; i += 1) {
+      expect((await (await post('/delivery/session', { licenceKey: key, installId: mine })).json()).plan)
+        .toBe('premium');
+    }
+  });
+
+  it('SECURITY §2.4: no installId (private browsing) is allowed, not punished', async () => {
+    // localStorage throws in some sandboxed/private contexts, so the loader
+    // sends no install id by design. Refusing those callers would break
+    // legitimate users on locked-down browsers to stop a sharer who can simply
+    // send a random id anyway.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Private OK', priceCents: 4900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false, maxInstalls: 1,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Private Co', email: 'private@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    for (let i = 0; i < 3; i += 1) {
+      expect((await (await post('/delivery/session', { licenceKey: key })).json()).plan).toBe('premium');
+    }
+  });
+
+  it('SECURITY §2.4: an UNCAPPED plan serves unlimited installs — opt-in only', async () => {
+    // maxInstalls defaults to 0, so every existing package is untouched and the
+    // feature stays inert until a plan opts in.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Unlimited Seats', priceCents: 19900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    expect(pkg.maxInstalls).toBe(0);
+    const cust = await (await post('/admin/customers', {
+      name: 'Big Co', email: 'bigco@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    for (const n of ['d', 'e', 'f', 'g', 'h', 'i']) {
+      const r = await (await post('/delivery/session', { licenceKey: key, installId: `oe_${n.repeat(32)}` })).json();
+      expect(r.plan).toBe('premium');
+    }
+  });
+
   it('SECURITY: an UNCAPPED plan is unaffected — the cap is opt-in', async () => {
     // maxDomains defaults to 0 = unlimited, so every EXISTING package and
     // licence keeps working. A migration that silently tightened live terms

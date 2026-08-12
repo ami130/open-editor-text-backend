@@ -16,6 +16,7 @@ import { PermissionEntity } from '../auth/entities/permission.entity';
 import { PackageAdminService } from './package-admin.service';
 import { RbacService } from './rbac.service';
 import { EngineAdminController } from './engine-admin.controller';
+import { DeliveryModule } from '../delivery/delivery.module';
 import {
   FeatureAdminController, PackageAdminController, CustomerAdminController, LicenseAdminController,
   PermissionAdminController, RoleAdminController, UserAdminController,
@@ -35,6 +36,13 @@ export class AdminModule {
           PackageEntity, FeatureEntity, CustomerEntity, LicenseEntity,
           UserEntity, RoleEntity, PermissionEntity,
         ]),
+        // §2.4 — LicenseInstallService for the seat view/release endpoints.
+        // Sibling modules do NOT see each other's exports, so without this
+        // import the @Optional() injection resolves to `undefined` and those
+        // endpoints silently return nothing forever. That precise failure is
+        // how the anti-sharing detector stayed inert for a whole phase, so a
+        // probe test asserts this wiring rather than trusting it.
+        DeliveryModule.forRoot(),
       ],
       controllers: [
         FeatureAdminController, PackageAdminController, CustomerAdminController, LicenseAdminController,

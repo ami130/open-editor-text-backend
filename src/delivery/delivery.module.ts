@@ -13,11 +13,13 @@ import { Module, DynamicModule } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { loadDatabaseConfig } from '../config/database.config';
 import { LicenseEntity } from '../licensing/entities/license.entity';
+import { LicenseInstallEntity } from './entities/license-install.entity';
 import { PortalModule } from '../portal/portal.module';
 import { DeliverySessionService } from './session.service';
 import { DeliverySessionController } from './session.controller';
 import { EngineController } from './engine.controller';
 import { BundleUrlSigner } from './bundle-url-signer';
+import { LicenseInstallService } from './license-install.service';
 
 @Module({})
 export class DeliveryModule {
@@ -28,7 +30,8 @@ export class DeliveryModule {
     return {
       module: DeliveryModule,
       imports: [
-        TypeOrmModule.forFeature([LicenseEntity]),
+        // LicenseInstallEntity backs the §2.4 seat cap.
+        TypeOrmModule.forFeature([LicenseEntity, LicenseInstallEntity]),
         // For the anti-sharing fetch-log + detector on /delivery/refresh.
         // Sibling modules do not see each other's exports automatically, so
         // this import is what makes those @Optional() injections resolve —
@@ -40,8 +43,8 @@ export class DeliveryModule {
       // the premium ones (R44). DELIVERY_CONFIG and BUNDLE_STORAGE come from
       // the @Global LicensingModule, which owns EngineVersionService.
       controllers: [DeliverySessionController, EngineController],
-      providers: [DeliverySessionService, BundleUrlSigner],
-      exports: [DeliverySessionService, BundleUrlSigner],
+      providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService],
+      exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService],
     };
   }
 }

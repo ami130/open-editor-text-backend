@@ -78,6 +78,27 @@ export class PackageEntity {
   maxDomains!: number;
 
   /**
+   * Cap on DISTINCT BROWSER INSTALLS this plan's licences may serve (§2.4).
+   *
+   * Domain binding locks a licence to its domains, but exempts `localhost` so
+   * developers can build. That exemption is unbounded — one shared key works on
+   * unlimited local machines and the domain gate never fires. Counting installs
+   * is what closes it.
+   *
+   * Defaults to 0 (unlimited), for the same reason as `maxDomains`: it must be
+   * opt-in per package and can never silently tighten a live customer's terms.
+   *
+   * Unlike `maxDomains`, this is enforced at SESSION time rather than issue
+   * time — installs appear as customers use the product, not when they buy. The
+   * enforcement is additive and fails open (see LicenseInstallService): a new
+   * install past the cap drops to the free plan, and a KNOWN install is never
+   * refused, so a paying customer cannot be locked out of a seat they already
+   * had.
+   */
+  @Column({ type: 'int', default: 0 })
+  maxInstalls!: number;
+
+  /**
    * Signed-token lifetime for licenses of this package (seconds); renewed on
    * expiry. Default 30 days to match the offline-revocation model: a revoked
    * license stops working within ~one TTL, since the offline verifier can't

@@ -30,7 +30,7 @@
  * exposed surface in the architecture (T20), and the best defence is that it
  * costs us almost nothing to serve.
  */
-import { Injectable, Inject } from '@nestjs/common';
+import { Injectable, Inject, Optional } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { LicenseEntity } from '../licensing/entities/license.entity';
@@ -39,6 +39,7 @@ import { EngineVersionService } from '../licensing/engine-version.service';
 import { EngineChannel } from '../licensing/entities/engine-version.entity';
 import { BundleUrlSigner } from './bundle-url-signer';
 import { hostAllowed } from '../licensing/domain-policy';
+import { LicenseInstallService } from './license-install.service';
 
 /** Lifetimes. Session is deliberately short — see the header. */
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -94,7 +95,11 @@ export interface SessionResponse {
 
 /** Why a session was refused. Never surfaced verbatim — see the controller. */
 export type SessionRefusal =
-  | 'invalid-key' | 'revoked' | 'expired' | 'origin-blocked' | 'no-version';
+  | 'invalid-key' | 'revoked' | 'expired' | 'origin-blocked' | 'no-version'
+  // §2.4 — a NEW install beyond the licence's seat cap. Distinct from
+  // 'origin-blocked' so support can tell "wrong domain" from "too many
+  // machines"; the customer-facing result is identical (a working free editor).
+  | 'install-cap';
 
 @Injectable()
 export class DeliverySessionService {
@@ -104,6 +109,12 @@ export class DeliverySessionService {
     private readonly signer: LicenseSignerService,
     private readonly versions: EngineVersionService,
     private readonly urls: BundleUrlSigner,
+    // @Optional so a deployment without the delivery entities registered still
+    // boots — the cap is then simply not enforced rather than crashing the
+    // session endpoint. Injection is verified by test, because an @Optional
+    // dependency that silently resolves to undefined is exactly how the
+    // anti-sharing detector was inert for a whole phase.
+    @Optional() private readonly installs?: LicenseInstallService,
   ) {}
 
   /**
@@ -308,6 +319,21 @@ export class DeliverySessionService {
     }
     if (!this.originAllowed(req.origin, licence.domains)) {
       return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'origin-blocked' };
+    }
+
+    // §2.4 — SEAT CAP. Last of the checks, deliberately: an invalid, revoked,
+    // expired or wrong-domain key must never consume a seat, or a leaked key
+    // could exhaust a customer's installs and lock the real owner out.
+    //
+    // Enforced here rather than at issue time because installs appear as the
+    // product is USED, not when it is bought. See LicenseInstallService for why
+    // a KNOWN install always passes and why the whole path fails open.
+    const cap = licence.package?.maxInstalls ?? 0;
+    if (cap > 0 && this.installs) {
+      const seat = await this.installs.check(licence.licId, req.installId ?? null, req.origin ?? null, cap);
+      if (!seat.allowed) {
+        return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'install-cap' };
+      }
     }
 
     const features = licence.package?.features?.length
