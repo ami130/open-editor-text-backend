@@ -52,7 +52,11 @@ export class PortalModule {
         RefreshLogService,
         SharingDetectorService,
       ],
-      exports: [CustomerAuthService],
+      // Exported so the DELIVERY refresh endpoint can log fetches and run
+      // anti-sharing detection (§2 security). Without this the @Optional()
+      // injections there resolve to undefined and the feature silently does
+      // nothing — the exact failure mode that made this gap invisible before.
+      exports: [CustomerAuthService, RefreshLogService, SharingDetectorService],
     };
   }
 }

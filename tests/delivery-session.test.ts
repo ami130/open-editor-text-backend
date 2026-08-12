@@ -98,6 +98,82 @@ describe('anonymous sessions — the free path must never require anything', () 
   });
 });
 
+describe('domain binding — one payment, one place (T11)', () => {
+  const claims = { lic: 'L1', customer: 'C1', features: ['export.pdf'], domains: [], iat: 0, exp: 9e9, kid: 'k' };
+  const bound = (domains: string[]) => ({
+    licId: 'L1', status: 'active', domains, features: ['export.pdf'],
+    package: { features: [{ id: 'export.pdf' }] },
+    customer: { id: 'C1' },
+    pinnedVersion: '', overrideVersion: '', channel: 'stable',
+    isExpired: () => false,
+  });
+  const openFrom = async (domains: string[], origin: string | null) => {
+    const svc = new DeliverySessionService(
+      licenceRepo([bound(domains)]) as any, fakeSigner({ KEY: claims }) as any,
+      fakeVersions() as any, urlSigner(),
+    );
+    return svc.open({ licenceKey: 'KEY', origin }, DEFAULTS);
+  };
+
+  it('grants premium on the licensed domain', async () => {
+    const { session } = await openFrom(['customer.com'], 'https://customer.com');
+    expect(session.plan).toBe(PREMIUM_PLAN);
+  });
+
+  it('DOWNGRADES on a different domain — one payment cannot cover two sites', async () => {
+    const { session, refusal } = await openFrom(['customer.com'], 'https://someone-else.com');
+    expect(session.plan).toBe(FREE_PLAN);
+    expect(refusal).toBe('origin-blocked');
+  });
+
+  it('a look-alike domain does not match', async () => {
+    // `evil-customer.com` ends with `customer.com` as a STRING but is a
+    // different domain. A naive endsWith() check would grant it.
+    const { session } = await openFrom(['customer.com'], 'https://evil-customer.com');
+    expect(session.plan).toBe(FREE_PLAN);
+  });
+
+  it('a wildcard covers ONE label, not arbitrary depth', async () => {
+    // REGRESSION: the delivery service carried its own copy of the matcher —
+    // `host === bare || host.endsWith('.' + bare)` — which accepted
+    // a.b.customer.com against *.customer.com while the licensing layer
+    // rejected it. Two implementations of one security rule always drift.
+    const ok = await openFrom(['*.customer.com'], 'https://app.customer.com');
+    expect(ok.session.plan).toBe(PREMIUM_PLAN);
+
+    const deep = await openFrom(['*.customer.com'], 'https://a.b.customer.com');
+    expect(deep.session.plan).toBe(FREE_PLAN);
+  });
+
+  it('a missing Origin on a domain-bound licence is refused', async () => {
+    // The browser always sends Origin; its absence means a non-browser caller,
+    // which cannot be attributed to a domain at all.
+    const { session } = await openFrom(['customer.com'], null);
+    expect(session.plan).toBe(FREE_PLAN);
+  });
+
+  it('localhost still works, so customers can develop (T2)', async () => {
+    for (const dev of ['http://localhost:3000', 'http://127.0.0.1:5173', 'http://app.localhost']) {
+      const { session } = await openFrom(['customer.com'], dev);
+      expect(session.plan, dev).toBe(PREMIUM_PLAN);
+    }
+  });
+
+  it('but the dev exemption is LOOPBACK ONLY — never a hostable domain', async () => {
+    // A broader exemption (a .local domain, a private IP) would be a bypass
+    // someone could actually host a real site on.
+    for (const notDev of ['http://myapp.local', 'http://192.168.1.10', 'http://localhost.evil.com']) {
+      const { session } = await openFrom(['customer.com'], notDev);
+      expect(session.plan, notDev).toBe(FREE_PLAN);
+    }
+  });
+
+  it('an UNBOUND licence works anywhere — domains: [] is opt-in binding', async () => {
+    const { session } = await openFrom([], 'https://anywhere.example');
+    expect(session.plan).toBe(PREMIUM_PLAN);
+  });
+});
+
 describe('the engine URL and the version claim (§1.4, R40/R41)', () => {
   it('signs the RESOLVED version into both tokens (R40)', async () => {
     // Without a version claim, a valid token could be replayed against any
@@ -296,9 +372,20 @@ describe('domain binding (T11) — domain, never device IP', () => {
     expect(refusal).toBeUndefined();
   });
 
-  it('a bound licence works on a subdomain', async () => {
-    const { refusal } = await openWith(['acme.com'], 'https://app.acme.com');
-    expect(refusal).toBeUndefined();
+  it('a bare domain does NOT cover subdomains — a wildcard is required', async () => {
+    // CHANGED with the canonical-matcher fix. This previously passed because
+    // the delivery service had its own `endsWith('.' + bare)` copy, which
+    // disagreed with BOTH the licensing layer and the editor's OFFLINE
+    // verifier (entitlements/domain-check.js). That disagreement is the real
+    // bug: a host could be granted online and denied offline, or vice versa.
+    //
+    // `acme.com` now means acme.com. To cover subdomains, license
+    // `*.acme.com` — which is explicit, and covers the apex too.
+    const bare = await openWith(['acme.com'], 'https://app.acme.com');
+    expect(bare.refusal).toBe('origin-blocked');
+
+    const wild = await openWith(['*.acme.com'], 'https://app.acme.com');
+    expect(wild.refusal).toBeUndefined();
   });
 
   it('a bound licence is refused on a different domain (this is the anti-sharing control)', async () => {

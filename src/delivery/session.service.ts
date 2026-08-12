@@ -38,6 +38,7 @@ import { LicenseSignerService } from '../licensing/license-signer.service';
 import { EngineVersionService } from '../licensing/engine-version.service';
 import { EngineChannel } from '../licensing/entities/engine-version.entity';
 import { BundleUrlSigner } from './bundle-url-signer';
+import { hostAllowed } from '../licensing/domain-policy';
 
 /** Lifetimes. Session is deliberately short — see the header. */
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -232,7 +233,7 @@ export class DeliverySessionService {
     origin: string | null,
     defaults: { channelDefault?: string | null; globalDefault?: string | null },
     fallbackToken?: string | null,
-  ): Promise<{ session: SessionResponse; refusal?: SessionRefusal }> {
+  ): Promise<{ session: SessionResponse; refusal?: SessionRefusal; licId?: string | null }> {
     // ⚠️ TWO TOKENS, BECAUSE THE FIRST ONE EXPIRES (E3).
     //
     // The engine refreshes using whatever is in `licenseKey` — the 15-minute
@@ -251,14 +252,17 @@ export class DeliverySessionService {
     // Neither verified: not an error the client can act on — it simply falls
     // back to a fresh anonymous session, exactly like a bad licence key does.
     // No oracle, no dead end.
-    if (!claims) return this.open({ origin }, defaults);
+    if (!claims) return { ...(await this.open({ origin }, defaults)), licId: null };
 
     // Re-resolve from the LICENCE, never from the token's own claims. A licence
     // revoked or downgraded since the token was issued must take effect on the
     // next refresh — otherwise a 30-day refresh token would keep premium alive
     // for a month after cancellation.
     const licenceKey = claims.lic ? await this.keyForLicence(claims.lic) : null;
-    return this.open({ licenceKey, origin }, defaults);
+    // `licId` is returned so the caller can attribute this refresh to a licence
+    // in the anti-sharing fetch-log. It is NOT part of the response body — it
+    // would be a licence-validity oracle there.
+    return { ...(await this.open({ licenceKey, origin }, defaults)), licId: claims.lic ?? null };
   }
 
   /**
@@ -319,21 +323,46 @@ export class DeliverySessionService {
 
   /**
    * Domain binding (T11). Empty `domains` means unbound — any origin is fine.
-   * localhost/127.0.0.1 are always allowed (T2) or customers cannot develop.
    *
    * Deliberately NOT IP-bound: our customer is a company whose thousands of
    * end-users each present a different, changing IP. Binding to one would lock
    * out office networks, mobile users, and multi-server deployments.
+   *
+   * ⚠️ USES THE CANONICAL MATCHER. This method previously carried its own copy
+   * of the matching rule — `host === bare || host.endsWith('.' + bare)` — which
+   * was WEAKER than `domain-policy.hostMatchesPattern` in a way that mattered:
+   *
+   *     a.b.customer.com  vs  *.customer.com   canonical: NO    copy: YES
+   *
+   * A wildcard is meant to cover ONE label, so arbitrarily deep subdomains were
+   * accepted here while the licensing layer rejected them. Two implementations
+   * of one security rule will always drift; there is now one.
    */
   private originAllowed(origin: string | null | undefined, domains: string[]): boolean {
     if (!domains?.length) return true;
     if (!origin) return false;
     let host: string;
     try { host = new URL(origin).hostname.toLowerCase(); } catch { return false; }
-    if (host === 'localhost' || host === '127.0.0.1' || host === '::1') return true;
-    return domains.some((d) => {
-      const bare = d.toLowerCase().replace(/^\*\./, '');
-      return host === bare || host.endsWith(`.${bare}`);
-    });
+    // A developer origin is allowed so customers can build (T2) — but it is
+    // NOT a free pass: isDevOrigin() is used by the caller to record that the
+    // session was granted on a dev host, so a shared key showing up on
+    // hundreds of localhosts is visible rather than invisible.
+    if (DeliverySessionService.devOrigin(host)) return true;
+    return hostAllowed(host, domains);
+  }
+
+  /**
+   * Is this a local development origin?
+   *
+   * Kept deliberately narrow — only true loopback, which can never serve a real
+   * site. Anything broader (a .local domain, a private IP range) would be a
+   * bypass someone could actually host on.
+   */
+  private static devOrigin(host: string): boolean {
+    return host === 'localhost'
+      || host === '127.0.0.1'
+      || host === '::1'
+      || host === '[::1]'
+      || host.endsWith('.localhost');
   }
 }

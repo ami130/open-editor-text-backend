@@ -36,6 +36,16 @@ export class CreatePackageDto {
   domainBound?: boolean;
 
   /**
+   * How many domains one licence of this plan may bind. 0 = unlimited.
+   *
+   * This is what makes "one payment, one place" a rule rather than a
+   * convention: `domainBound` requires domains to be named, but never limited
+   * how many. Defaults to 0 so existing plans are unaffected — a cap is opt-in.
+   */
+  @IsOptional() @IsInt() @Min(0) @Max(1000)
+  maxDomains?: number;
+
+  /**
    * Explicit TTL override (seconds). Omit/null (normal) → the license TTL is
    * DERIVED from billingInterval via durationPolicy(). When set, it wins over the
    * derived value. This is the SINGLE explicit-TTL knob (the legacy
@@ -79,6 +89,8 @@ export class UpdatePackageDto {
   @IsOptional() @IsIn(['USD'], { message: 'currency must be USD' }) currency?: string;
   @IsOptional() @IsIn(BILLING_INTERVALS) billingInterval?: (typeof BILLING_INTERVALS)[number];
   @IsOptional() @IsBoolean() domainBound?: boolean;
+  /** Domains one licence may bind; 0 = unlimited (§2 security). */
+  @IsOptional() @IsInt() @Min(0) @Max(1000) maxDomains?: number;
   @IsOptional() @IsInt() @Min(3600) @Max(95_000_000) ttlOverrideSeconds?: number;
   @IsOptional() @IsBoolean() isFree?: boolean;
   @IsOptional() @IsBoolean() active?: boolean;

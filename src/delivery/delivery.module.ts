@@ -13,6 +13,7 @@ import { Module, DynamicModule } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { loadDatabaseConfig } from '../config/database.config';
 import { LicenseEntity } from '../licensing/entities/license.entity';
+import { PortalModule } from '../portal/portal.module';
 import { DeliverySessionService } from './session.service';
 import { DeliverySessionController } from './session.controller';
 import { EngineController } from './engine.controller';
@@ -26,7 +27,15 @@ export class DeliveryModule {
     }
     return {
       module: DeliveryModule,
-      imports: [TypeOrmModule.forFeature([LicenseEntity])],
+      imports: [
+        TypeOrmModule.forFeature([LicenseEntity]),
+        // For the anti-sharing fetch-log + detector on /delivery/refresh.
+        // Sibling modules do not see each other's exports automatically, so
+        // this import is what makes those @Optional() injections resolve —
+        // without it they would be `undefined` and detection would silently
+        // never run.
+        PortalModule.forRoot(),
+      ],
       // EngineController serves bundle bytes (§1.4); BundleUrlSigner protects
       // the premium ones (R44). DELIVERY_CONFIG and BUNDLE_STORAGE come from
       // the @Global LicensingModule, which owns EngineVersionService.

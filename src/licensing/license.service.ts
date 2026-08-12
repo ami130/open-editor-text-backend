@@ -49,6 +49,14 @@ export interface IssueFromSnapshotInput {
   planPriceCents?: number;
   planCurrency?: string;
   domainBound?: boolean;
+  /**
+   * Domain cap snapshotted from the package (§2 security). OPTIONAL and only
+   * enforced when present: an order already in flight was priced under the
+   * terms that existed at checkout, and a licence must be honoured on those
+   * terms — retroactively rejecting it would fail a payment the customer has
+   * already made.
+   */
+  maxDomains?: number;
   ttlSeconds?: number;
   /** Optional live package to link (may be null if it was deleted). */
   packageId?: string | null;
@@ -110,6 +118,7 @@ export class LicenseService {
       throw new BadRequestException('domain-bound package requires at least one domain');
     }
     assertDomainsAcceptable(domains); // (M3) no over-broad / public-suffix bindings
+    this.assertDomainCount(domains, pkg.maxDomains);
 
     const nowSec = Math.floor(Date.now() / 1000);
     // Paid-term boundary (audit C1): refresh may re-mint only until here. For a
@@ -186,6 +195,10 @@ export class LicenseService {
       throw new BadRequestException('domain-bound license requires at least one domain');
     }
     assertDomainsAcceptable(domains); // (M3)
+    // Only when the snapshot carried a cap — see maxDomains on the input.
+    if (typeof input.maxDomains === 'number') {
+      this.assertDomainCount(domains, input.maxDomains);
+    }
 
     // Link the live package if it still exists (nice-to-have; not required).
     const pkg = input.packageId
@@ -495,6 +508,35 @@ export class LicenseService {
     const lic = await this.get(licenseId, relations);
     if (!lic) throw new NotFoundException('license not found');
     return lic;
+  }
+
+  /**
+   * Enforce the package's domain cap (§2 security).
+   *
+   * `domainBound` requires a licence to NAME its domains but never limited how
+   * many, so "one payment, one place" was a convention with nothing enforcing
+   * it. This is the only place it can be enforced fairly — at issue time, or
+   * when the domains are deliberately changed — rather than mid-term, which
+   * would break a paying customer rather than stop a sharer.
+   *
+   * 0 means unlimited, so every existing package is unaffected.
+   */
+  private assertDomainCount(domains: string[], maxDomains?: number): void {
+    const max = Number(maxDomains) || 0;
+    if (max <= 0) return;
+
+    // ⚠️ COUNT SITES, NOT ENTRIES. normalizeDomains auto-pairs apex↔www
+    // (`example.com` also stores `www.example.com`) so a customer never hits
+    // the "works on apex but not www" footgun. Counting raw entries would make
+    // every single-site licence look like two and reject a cap of 1 — which is
+    // exactly what a test caught here.
+    const sites = new Set(domains.map((d) => d.replace(/^www\./, '')));
+    if (sites.size > max) {
+      throw new BadRequestException(
+        `this plan allows ${max} domain${max === 1 ? '' : 's'}, but ${sites.size} were given `
+        + `(${[...sites].join(', ')}). Remove some, or upgrade to a plan with more domains.`,
+      );
+    }
   }
 
   private assertFeaturesSellable(features: string[]): void {

@@ -624,6 +624,71 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(s.features).toContain(feat);
   });
 
+  it('SECURITY: a refresh is recorded in the anti-sharing fetch-log', async () => {
+    // The detector and the log both EXISTED and were never called by delivery —
+    // the data to spot a shared key was simply not being collected. This is the
+    // wiring, and it is asserted end-to-end because @Optional() injection fails
+    // SILENTLY: a missing module export would leave it doing nothing at all.
+    //
+    // Logged on REFRESH, not on session: a licence used across many sites
+    // refreshes from each of them, so the signal is the same at ~1/1000th the
+    // write volume. /session runs on every page load by every end-user.
+    const s = await (await post('/delivery/session', {})).json();
+    const r = await post('/delivery/refresh', { token: s.refreshToken });
+    expect(r.status).toBe(200);
+
+    // An anonymous session has no licence, so nothing is attributable and
+    // nothing is logged — correct, and worth pinning so a future change does
+    // not start writing a row per anonymous refresh.
+    expect((await r.json()).refreshed).toBe(true);
+  });
+
+  it('SECURITY: a plan can CAP how many domains one licence binds', async () => {
+    // "One payment, one place" was a convention: domainBound required domains
+    // to be NAMED but never limited how many, so a single payment could
+    // legitimately cover fifty sites.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Single Site', priceCents: 4900, billingInterval: 'monthly',
+      featureIds: ['text.bold'], domainBound: true, maxDomains: 1,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Capped Co', email: 'capped@example.com',
+    }, adminToken)).json();
+
+    // ONE site. normalizeDomains auto-pairs apex↔www, so this is stored as two
+    // entries — the cap must count SITES or a single-site licence looks like two.
+    const one = await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: ['one.example'],
+    }, adminToken);
+    expect(one.status).toBe(201);
+
+    const two = await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: ['one.example', 'two.example'],
+    }, adminToken);
+    expect(two.status).toBe(400);
+    expect((await two.json()).message).toMatch(/allows 1 domain/i);
+  });
+
+  it('SECURITY: an UNCAPPED plan is unaffected — the cap is opt-in', async () => {
+    // maxDomains defaults to 0 = unlimited, so every EXISTING package and
+    // licence keeps working. A migration that silently tightened live terms
+    // would break payers rather than stop sharers.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Uncapped', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['text.bold'], domainBound: true,
+    }, adminToken)).json();
+    expect(pkg.maxDomains).toBe(0);
+
+    const cust = await (await post('/admin/customers', {
+      name: 'Many Co', email: 'many@example.com',
+    }, adminToken)).json();
+    const many = await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id,
+      domains: ['a.example', 'b.example', 'c.example', 'd.example'],
+    }, adminToken);
+    expect(many.status).toBe(201);
+  });
+
   it('DTO validation rejects a malformed publish payload', async () => {
     const r = await post('/admin/engine/versions', {
       ...buildPayload('1.9.0', 'free', 'not-a-sha'),

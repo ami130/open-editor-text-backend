@@ -26,7 +26,7 @@
  * A customer whose subscription lapsed mid-session gets a working FREE editor,
  * not a blank page or an error. Downgrade, never break.
  */
-import { Controller, Post, Body, Query, Req, HttpCode } from '@nestjs/common';
+import { Controller, Post, Body, Query, Req, HttpCode, Optional } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { Public } from '../auth/decorators';
@@ -35,6 +35,8 @@ import { DeliverySessionService } from './session.service';
 import { EngineVersionService } from '../licensing/engine-version.service';
 import { SessionRequestDto, RefreshSessionDto } from './dto/session.dto';
 import { recordSessionUsage } from './usage-log';
+import { RefreshLogService } from '../portal/refresh-log.service';
+import { SharingDetectorService } from '../portal/sharing-detector.service';
 
 const T = loadThrottleConfig();
 
@@ -43,6 +45,11 @@ export class DeliverySessionController {
   constructor(
     private readonly sessions: DeliverySessionService,
     private readonly versions: EngineVersionService,
+    // @Optional so DeliveryModule still resolves where PortalModule is absent
+    // (a DB-less deployment). Anti-sharing is a detection layer, not a gate —
+    // its absence must never stop a session being issued.
+    @Optional() private readonly refreshLog?: RefreshLogService,
+    @Optional() private readonly sharing?: SharingDetectorService,
   ) {}
 
   @Throttle({ default: { ttl: T.authTtlMs, limit: T.authLimit } })
@@ -117,10 +124,35 @@ export class DeliverySessionController {
     // the caller can set one.
     const fallback = dto.refreshToken ?? queryRefreshToken ?? null;
 
-    const { session, refusal } = await this.sessions.refresh(
+    const { session, refusal, licId } = await this.sessions.refresh(
       dto.token, origin, defaults, fallback,
     );
-    void refusal; // logging only — never surfaced (no key-validation oracle)
+
+    // ─── ANTI-SHARING: log the REFRESH, never the session ───────────────────
+    //
+    // A licence used across many sites will refresh from each of them, so the
+    // signal here is the same as logging every session — at roughly 1/1000th
+    // the write volume. `/session` runs on every page load by every end-user;
+    // a database row each would be exactly the traffic shape T17's stateless
+    // design exists to avoid, on the most exposed endpoint in the architecture.
+    // `/delivery/refresh` runs on a ~15-minute timer per open editor instead.
+    //
+    // Best-effort and awaited only for its side effect: a logging failure must
+    // never turn a working refresh into a failed one.
+    if (licId && this.refreshLog && this.sharing) {
+      const ip = (req.ip || '').toString() || null;
+      await this.refreshLog.record({
+        // The portal's existing vocabulary, reused deliberately: one uniform
+        // log means the detector needs no special case for delivery events.
+        outcome: refusal ? 'refused' : 'refreshed', licId, ip, origin,
+      }).catch(() => undefined);
+      // SOFT by design: this sets a flag for a human to review and the licence
+      // KEEPS WORKING. A CDN customer with many points of presence looks exactly
+      // like sharing, and cutting off a payer is worse than the sharing itself.
+      await this.sharing.evaluateAndFlag(licId).catch(() => undefined);
+    }
+
+    void refusal; // never surfaced in the response (no key-validation oracle)
 
     return {
       // The engine only applies the new token when `refreshed` is true.

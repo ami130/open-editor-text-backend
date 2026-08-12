@@ -59,6 +59,25 @@ export class PackageEntity {
   domainBound!: boolean;
 
   /**
+   * How many domains one licence of this package may bind (0 = unlimited).
+   *
+   * ─── WHY A COUNT, NOT JUST A BOOLEAN ────────────────────────────────────
+   * `domainBound` says a licence must name its domains; it says nothing about
+   * HOW MANY. Without a cap, one payment could legitimately list fifty sites —
+   * so "one payment, one place" was a convention rather than a rule, and
+   * nothing enforced it at the moment a licence is issued.
+   *
+   * Defaults to 0 (unlimited) so EXISTING packages and licences are completely
+   * unaffected: this must be opt-in per package, never a silent tightening that
+   * breaks a customer who already listed several domains.
+   *
+   * Enforced at ISSUE time (and on any later domain change), which is the only
+   * place it can be enforced without punishing a customer mid-term.
+   */
+  @Column({ type: 'int', default: 0 })
+  maxDomains!: number;
+
+  /**
    * Signed-token lifetime for licenses of this package (seconds); renewed on
    * expiry. Default 30 days to match the offline-revocation model: a revoked
    * license stops working within ~one TTL, since the offline verifier can't
