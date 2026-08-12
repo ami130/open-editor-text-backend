@@ -19,8 +19,34 @@
  */
 
 export interface DeliveryConfig {
-  /** Directory holding bundle bytes in Phase 1. Replaced by object storage in Phase 2. */
+  /**
+   * Which BundleStorage driver to use (§2.0 / T21).
+   *
+   * Defaults to 'local' so an existing deployment keeps its current behaviour
+   * exactly — switching to object storage must be a deliberate act, never a
+   * side effect of upgrading.
+   */
+  storageDriver: 'local' | 's3';
+  /** Directory holding bundle bytes with the 'local' driver. */
   bundleDir: string;
+  /**
+   * S3-compatible object storage (§2.0). Set `endpoint` for MinIO or R2; leave
+   * it unset for real AWS S3.
+   *
+   * WHY THIS MATTERS: local disk is per-instance, so the app refuses to start
+   * with DELIVERY_INSTANCES > 1, and a redeploy on an ephemeral filesystem
+   * wipes every bundle. Object storage removes both limits and becomes the
+   * origin a CDN fronts in §2.1.
+   */
+  s3: {
+    bucket: string;
+    region: string;
+    endpoint: string;
+    accessKeyId: string;
+    secretAccessKey: string;
+    forcePathStyle: boolean;
+    prefix: string;
+  };
   /**
    * HMAC secret for premium bundle URLs. Server-only: anyone holding it can
    * mint premium download links.
@@ -89,8 +115,26 @@ export function loadDeliveryConfig(env: NodeJS.ProcessEnv = process.env): Delive
   const secret = (env.DELIVERY_URL_SECRET || '').trim();
   const ttl = Number(env.DELIVERY_URL_TTL_SECONDS);
 
+  const driver = (env.DELIVERY_STORAGE || '').trim().toLowerCase() === 's3' ? 's3' : 'local';
+
   return {
+    storageDriver: driver as 'local' | 's3',
     bundleDir: (env.DELIVERY_BUNDLE_DIR || '').trim() || 'storage/bundles',
+    s3: {
+      bucket: (env.DELIVERY_S3_BUCKET || '').trim(),
+      region: (env.DELIVERY_S3_REGION || '').trim() || 'us-east-1',
+      // Any non-AWS S3 store (MinIO, R2, Backblaze) needs an explicit endpoint.
+      endpoint: (env.DELIVERY_S3_ENDPOINT || '').trim(),
+      accessKeyId: (env.DELIVERY_S3_ACCESS_KEY_ID || '').trim(),
+      secretAccessKey: (env.DELIVERY_S3_SECRET_ACCESS_KEY || '').trim(),
+      // Path-style is required by MinIO and most self-hosted stores, because
+      // virtual-host style needs wildcard DNS. Default it on whenever a custom
+      // endpoint is set, since that is the case where it is nearly always right.
+      forcePathStyle: (env.DELIVERY_S3_FORCE_PATH_STYLE || '').trim() === 'false'
+        ? false
+        : !!(env.DELIVERY_S3_ENDPOINT || '').trim(),
+      prefix: (env.DELIVERY_S3_PREFIX || '').trim(),
+    },
     urlSigningSecret: secret,
     signingEnabled: secret.length > 0,
     urlTtlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_URL_TTL,

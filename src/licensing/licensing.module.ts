@@ -26,6 +26,7 @@ import {
 } from '../config/delivery.config';
 import { BUNDLE_STORAGE } from '../delivery/bundle-storage';
 import { LocalBundleStorage } from '../delivery/local-bundle-storage';
+import { S3BundleStorage } from '../delivery/s3-bundle-storage';
 
 const ENTITIES = [
   FeatureEntity, PackageEntity, CustomerEntity, LicenseEntity,
@@ -60,7 +61,22 @@ export class LicensingModule {
         { provide: DELIVERY_CONFIG, useFactory: () => loadDeliveryConfig() },
         {
           provide: BUNDLE_STORAGE,
-          useFactory: (cfg: DeliveryConfig) => new LocalBundleStorage(cfg.bundleDir),
+          // §2.0 — driver chosen by config. Defaults to LOCAL, so an existing
+          // deployment keeps its exact current behaviour; moving to object
+          // storage is a deliberate act, never a side effect of upgrading.
+          useFactory: (cfg: DeliveryConfig) => (
+            cfg.storageDriver === 's3'
+              ? new S3BundleStorage({
+                bucket: cfg.s3.bucket,
+                region: cfg.s3.region,
+                endpoint: cfg.s3.endpoint || undefined,
+                accessKeyId: cfg.s3.accessKeyId || undefined,
+                secretAccessKey: cfg.s3.secretAccessKey || undefined,
+                forcePathStyle: cfg.s3.forcePathStyle,
+                prefix: cfg.s3.prefix || undefined,
+              })
+              : new LocalBundleStorage(cfg.bundleDir)
+          ),
           inject: [DELIVERY_CONFIG],
         },
       );
