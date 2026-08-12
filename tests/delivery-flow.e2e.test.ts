@@ -758,6 +758,79 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(await acts.pendingFor(install)).toBeTruthy();
   });
 
+  it('§2.8 INCIDENT REHEARSAL: publish a bad version, roll it back, sessions recover', async () => {
+    // The scenario the plan calls "currently undefined, must exist before
+    // launch": a release breaks every customer at once and someone has to
+    // recover under pressure.
+    const before = await (await post('/delivery/session', {})).json();
+    const good = before.version;
+
+    // Ship a new version and make it the default — sessions move to it.
+    await post('/admin/engine/versions', buildPayload('9.9.9', 'free', SHA_A), adminToken);
+    await post('/admin/engine/versions', buildPayload('9.9.9', 'premium', SHA_B), adminToken);
+    await patch('/admin/engine/versions/9.9.9/channel', { channel: 'stable' }, adminToken);
+    expect((await post('/admin/engine/defaults', { scope: 'global', version: '9.9.9' }, adminToken)).status).toBe(201);
+    expect((await (await post('/delivery/session', {})).json()).version).toBe('9.9.9');
+
+    // 03:00 — it is bad. Roll back with NO version argument: the target comes
+    // from history, so it cannot be mistyped under pressure.
+    const rb = await post('/admin/engine/rollback', {
+      scope: 'global', reason: 'e2e rehearsal — bad release',
+    }, adminToken);
+    expect(rb.status).toBe(201);
+    const result = await rb.json();
+    expect(result.from).toBe('9.9.9');
+    expect(result.to).toBe(good);
+
+    // Every NEW session is back on the known-good version, with no customer action.
+    expect((await (await post('/delivery/session', {})).json()).version).toBe(good);
+
+    // And the incident is recorded: what moved, which way, and why.
+    const hist = await (await get('/admin/engine/defaults/history?scope=global', adminToken)).json();
+    expect(hist[0].kind).toBe('rollback');
+    expect(hist[0].toVersion).toBe(good);
+    expect(hist[0].reason).toMatch(/bad release/);
+  });
+
+  it('§2.8: rollback still works when the good version was RETIRED', async () => {
+    // The real incident shape: retire the old version, ship the new one, the
+    // new one breaks. Refusing to roll back to a retired version would block
+    // recovery over a policy flag, at the only moment it matters.
+    //
+    // Scoped to channel:beta, NOT global. These tests share one app, and
+    // leaving `global` pointing at a retired 8.8.8 corrupted every later test —
+    // an incident rehearsal must not itself cause an incident.
+    for (const v of ['8.8.8', '8.8.9']) {
+      await post('/admin/engine/versions', buildPayload(v, 'free', SHA_A), adminToken);
+      await post('/admin/engine/versions', buildPayload(v, 'premium', SHA_B), adminToken);
+      await patch(`/admin/engine/versions/${v}/channel`, { channel: 'beta' }, adminToken);
+      await post('/admin/engine/defaults', { scope: 'channel:beta', version: v }, adminToken);
+    }
+
+    await patch('/admin/engine/versions/8.8.8/retire', { notes: 'superseded' }, adminToken);
+
+    // A NORMAL release to a retired version is still refused…
+    const direct = await post('/admin/engine/defaults', { scope: 'channel:beta', version: '8.8.8' }, adminToken);
+    expect(direct.status).toBe(400);
+    expect((await direct.json()).message).toMatch(/retired/i);
+
+    // …but the ROLLBACK path recovers anyway.
+    const rb = await post('/admin/engine/rollback', {
+      scope: 'channel:beta', reason: 'retired-target rehearsal',
+    }, adminToken);
+    expect(rb.status).toBe(201);
+    expect((await rb.json()).to).toBe('8.8.8');
+  });
+
+  it('§2.8: rollback REFUSES rather than guessing when there is no history', async () => {
+    // An incident is the worst moment to silently pick a version nobody chose.
+    // channel:internal is untouched by every other test — a scope that HAS
+    // history would prove nothing here.
+    const r = await post('/admin/engine/rollback', { scope: 'channel:internal' }, adminToken);
+    expect(r.status).toBe(400);
+    expect((await r.json()).message).toMatch(/nothing to roll back/i);
+  });
+
   it('SECURITY §2.4: a licence serves only its capped number of INSTALLS', async () => {
     // THE HOLE THIS CLOSES: domain binding exempts `localhost` so developers can
     // build without owning the customer's domain — but that exemption has no

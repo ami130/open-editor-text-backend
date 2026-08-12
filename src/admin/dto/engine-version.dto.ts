@@ -103,6 +103,10 @@ export class SetDefaultDto {
   @IsString()
   @Matches(/^\d+\.\d+\.\d+(-[\w.]+)?$/)
   version!: string;
+
+  /** Why this pointer moved — kept in history for the incident write-up. */
+  @IsOptional() @IsString() @MaxLength(500)
+  reason?: string;
 }
 
 export class RetireVersionDto {
@@ -110,4 +114,25 @@ export class RetireVersionDto {
   @IsString()
   @MaxLength(500)
   notes?: string;
+}
+
+
+/**
+ * §2.8 — a rollback request.
+ *
+ * NOTE: there is deliberately NO `version` field. The target comes from the
+ * recorded history, not from a human typing a version number during an
+ * incident, which is the realistic way a rollback goes wrong.
+ */
+export class RollbackDto {
+  @IsString()
+  @Matches(/^(global|channel:(internal|beta|stable))$/, {
+    message: 'scope must be "global" or "channel:internal|beta|stable"',
+  })
+  scope!: string;
+
+  /** Why — recorded in history. Strongly encouraged, not enforced: an incident
+   *  must never be blocked by a validation error on a description. */
+  @IsOptional() @IsString() @MaxLength(500)
+  reason?: string;
 }

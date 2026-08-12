@@ -18,7 +18,7 @@
  *      all assume the bytes behind a version never change.
  */
 import {
-  Injectable, BadRequestException, NotFoundException, Inject, Optional,
+  Injectable, BadRequestException, NotFoundException, Inject, Optional, Logger,
 } from '@nestjs/common';
 import { Repository, In } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -27,6 +27,7 @@ import { EngineVersionEntity, EngineChannel } from './entities/engine-version.en
 import {
   EngineDefaultEntity, GLOBAL_SCOPE, channelScope,
 } from './entities/engine-default.entity';
+import { EngineDefaultHistoryEntity } from './entities/engine-default-history.entity';
 import {
   resolveVersion, resolveFeatures, missingFromBuild, channelAllows,
   eligibleAsDefault,
@@ -80,6 +81,10 @@ export interface ResolvedDelivery {
 
 @Injectable()
 export class EngineVersionService {
+  /** §2.8 — a failed history write must be visible, not swallowed: it is what
+   *  a future rollback reads. */
+  private readonly log = new Logger(EngineVersionService.name);
+
   constructor(
     @InjectRepository(EngineVersionEntity)
     private readonly versions: Repository<EngineVersionEntity>,
@@ -92,6 +97,20 @@ export class EngineVersionService {
      */
     @Optional() @Inject(BUNDLE_STORAGE)
     private readonly storage: BundleStorage | null = null,
+    /**
+     * §2.8 release/rollback history.
+     *
+     * ⚠️ LAST parameter deliberately. This service is constructed POSITIONALLY
+     * in unit tests (`new EngineVersionService(repo, defaults, storage)`), so
+     * inserting a parameter in the middle silently shifts `storage` into the
+     * wrong slot — which is exactly what happened: 37 tests failed with
+     * "bundle bytes were supplied but no BundleStorage is configured".
+     *
+     * @Optional: when absent, pointer moves still work, they are simply not
+     * recorded, and rollback then refuses rather than guessing a target.
+     */
+    @Optional() @InjectRepository(EngineDefaultHistoryEntity)
+    private readonly history?: Repository<EngineDefaultHistoryEntity>,
   ) {}
 
   // ── Default pointers (steps 3 and 4 of the resolution chain) ──────────────
@@ -104,7 +123,11 @@ export class EngineVersionService {
    * Refuses an incomplete or retired version — a default must be something
    * every plan can actually be served.
    */
-  async setDefault(scope: string, version: string): Promise<EngineDefaultEntity> {
+  async setDefault(
+    scope: string,
+    version: string,
+    audit: { actor?: string; reason?: string; kind?: 'release' | 'rollback' } = {},
+  ): Promise<EngineDefaultEntity> {
     const { complete, missingPlans } = await this.isComplete(version);
     if (!complete) {
       throw new BadRequestException(
@@ -114,15 +137,103 @@ export class EngineVersionService {
       );
     }
     const rows = await this.versions.find({ where: { version } });
-    if (rows.some((r) => !eligibleAsDefault(r.status))) {
-      throw new BadRequestException(`Cannot make ${version} a default: it is retired.`);
+    /**
+     * A retired version cannot normally become the default — retirement means
+     * "stop resolving new sessions here".
+     *
+     * ⚠️ EXCEPT DURING A ROLLBACK. The incident shape is exactly:
+     *   retire v1.3.0 → publish v1.4.0 → v1.4.0 is broken → roll back
+     * and refusing here would block the recovery at the only moment it matters,
+     * over a policy flag rather than any real problem with the bundle. The
+     * bundle is still stored, still complete (checked above), and was serving
+     * production an hour ago.
+     *
+     * So a rollback may target a retired version; a normal release may not.
+     */
+    if (audit.kind !== 'rollback' && rows.some((r) => !eligibleAsDefault(r.status))) {
+      throw new BadRequestException(
+        `Cannot make ${version} a default: it is retired. `
+        + '(A rollback may still target it — use the rollback endpoint.)',
+      );
     }
     const existing = await this.defaults.findOne({ where: { scope } });
-    if (existing) {
-      existing.version = version;
-      return this.defaults.save(existing);
+    const fromVersion = existing?.version || '';
+
+    const saved = existing
+      ? await this.defaults.save(Object.assign(existing, { version }))
+      : await this.defaults.save(this.defaults.create({ scope, version }));
+
+    // §2.8 — record the move. `engine_defaults` keeps only the CURRENT pointer,
+    // so without this the previous (known-good) version is overwritten and a
+    // rollback has nothing to aim at. Best-effort: a history write must never
+    // block a release or, worse, a rollback during an incident.
+    if (this.history && fromVersion !== version) {
+      try {
+        await this.history.insert({
+          scope,
+          fromVersion,
+          toVersion: version,
+          kind: audit.kind || 'release',
+          actor: (audit.actor || '').slice(0, 128),
+          reason: (audit.reason || '').slice(0, 500),
+        });
+      } catch (err) {
+        this.log.warn(`could not record default history: ${String(err)}`);
+      }
     }
-    return this.defaults.save(this.defaults.create({ scope, version }));
+    return saved;
+  }
+
+  /**
+   * §2.8 — the version this scope was on BEFORE its current one.
+   *
+   * This is the rollback target, read rather than guessed. Returns null when
+   * there is no recorded previous version, which the caller must surface
+   * plainly: an incident is the worst possible moment to silently pick a
+   * version nobody chose.
+   */
+  async previousDefault(scope: string): Promise<string | null> {
+    if (!this.history) return null;
+    const rows = await this.history.find({
+      where: { scope },
+      order: { createdAt: 'DESC' },
+      take: 1,
+    });
+    const from = rows[0]?.fromVersion || '';
+    return from || null;
+  }
+
+  /**
+   * Roll back a scope to its previous version, in ONE call.
+   *
+   * Deliberately not "setDefault with the right argument": at 03:00 the failure
+   * mode is naming the wrong version, so the safe operation is the one that
+   * needs no argument at all. The target comes from history, and every guard in
+   * setDefault (bundle completeness, retirement) still applies.
+   */
+  async rollback(scope: string, audit: { actor?: string; reason?: string } = {}): Promise<{
+    scope: string; from: string; to: string;
+  }> {
+    const current = await this.defaults.findOne({ where: { scope } });
+    const target = await this.previousDefault(scope);
+    if (!target) {
+      throw new BadRequestException(
+        `No previous version recorded for '${scope}', so there is nothing to roll back to. `
+        + 'Set the default explicitly to a known-good version instead.',
+      );
+    }
+    await this.setDefault(scope, target, { ...audit, kind: 'rollback' });
+    return { scope, from: current?.version || '', to: target };
+  }
+
+  /** Recent pointer moves — what changed, when, by whom. */
+  async defaultHistory(scope?: string, limit = 50): Promise<EngineDefaultHistoryEntity[]> {
+    if (!this.history) return [];
+    return this.history.find({
+      where: scope ? { scope } : {},
+      order: { createdAt: 'DESC' },
+      take: Math.min(Math.max(limit, 1), 200),
+    });
   }
 
   /**

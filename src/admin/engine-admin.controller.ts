@@ -14,7 +14,7 @@
  * "who moved the default at 3am" is answerable.
  */
 import {
-  Controller, Get, Post, Patch, Param, Body, Logger,
+  Controller, Get, Post, Patch, Param, Query, Body, Logger,
 } from '@nestjs/common';
 import { RequirePermissions, CurrentUser } from '../auth/decorators';
 import type { AccessClaims } from '../auth/auth.service';
@@ -22,7 +22,7 @@ import { EngineVersionService } from '../licensing/engine-version.service';
 import { EngineChannel } from '../licensing/entities/engine-version.entity';
 import {
   PublishEngineBuildDto, PromoteVersionDto, SetDefaultDto, RetireVersionDto,
-  RestoreBundleDto,
+  RestoreBundleDto, RollbackDto,
 } from './dto/engine-version.dto';
 
 @Controller('admin/engine')
@@ -142,10 +142,47 @@ export class EngineAdminController {
    * Customers with an explicit pin are deliberately unaffected: a pin outranks
    * every default, which is exactly what makes pinning trustworthy.
    */
+  /**
+   * §2.8 — ROLL BACK a scope to its previous version, in ONE call.
+   *
+   * Deliberately takes no version argument. At 03:00 the realistic failure is
+   * naming the wrong version under pressure, so the safe operation is the one
+   * that cannot be given a wrong value: the target is read from the recorded
+   * history, not typed by a human mid-incident.
+   *
+   * Uses engine.default permission — it is the same authority as a release,
+   * because it is the same action pointed backwards.
+   */
+  @Post('rollback')
+  @RequirePermissions('engine.default')
+  async rollback(@Body() dto: RollbackDto, @CurrentUser() user: AccessClaims) {
+    const result = await this.engine.rollback(dto.scope, {
+      actor: user?.sub ?? '',
+      reason: dto.reason ?? '',
+    });
+    // WARN, not LOG: a rollback is an incident signal and should stand out in
+    // whatever aggregates these lines.
+    this.log.warn(
+      `ROLLBACK: ${result.scope} ${result.from || '(unset)'} → ${result.to} `
+      + `by ${user?.sub ?? 'unknown'}${dto.reason ? ` — ${dto.reason}` : ''}`,
+    );
+    return result;
+  }
+
+  /** §2.8 — what changed, when, and by whom. The rollback target comes from here. */
+  @Get('defaults/history')
+  @RequirePermissions('engine.read')
+  history(@Query('scope') scope?: string, @Query('limit') limit?: string) {
+    return this.engine.defaultHistory(scope, Number(limit) || 50);
+  }
+
   @Post('defaults')
   @RequirePermissions('engine.default')
   async setDefault(@Body() dto: SetDefaultDto, @CurrentUser() user: AccessClaims) {
-    const row = await this.engine.setDefault(dto.scope, dto.version);
+    const row = await this.engine.setDefault(dto.scope, dto.version, {
+      actor: user?.sub ?? '',
+      reason: dto.reason ?? '',
+    });
     this.log.warn(
       `DEFAULT CHANGED: ${dto.scope} → ${dto.version} by ${user?.sub ?? 'unknown'} `
       + '(this is what new sessions now receive)',

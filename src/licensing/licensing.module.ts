@@ -21,6 +21,7 @@ import { CustomerEntity } from './entities/customer.entity';
 import { LicenseEntity } from './entities/license.entity';
 import { EngineVersionEntity } from './entities/engine-version.entity';
 import { EngineDefaultEntity } from './entities/engine-default.entity';
+import { EngineDefaultHistoryEntity } from './entities/engine-default-history.entity';
 import {
   DELIVERY_CONFIG, DeliveryConfig, loadDeliveryConfig,
 } from '../config/delivery.config';
@@ -32,6 +33,8 @@ const ENTITIES = [
   FeatureEntity, PackageEntity, CustomerEntity, LicenseEntity,
   // Runtime delivery §1.2 — the engine version registry + default pointers.
   EngineVersionEntity, EngineDefaultEntity,
+  // §2.8 — release/rollback audit trail; the rollback target is read from it.
+  EngineDefaultHistoryEntity,
 ];
 
 // @Global so LicenseService/LicenseSignerService are visible app-wide from a
