@@ -40,6 +40,7 @@ import { EngineChannel } from '../licensing/entities/engine-version.entity';
 import { BundleUrlSigner } from './bundle-url-signer';
 import { hostAllowed } from '../licensing/domain-policy';
 import { LicenseInstallService } from './license-install.service';
+import { WatermarkService } from './watermark.service';
 
 /** Lifetimes. Session is deliberately short — see the header. */
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -128,6 +129,8 @@ export class DeliverySessionService {
     // dependency that silently resolves to undefined is exactly how the
     // anti-sharing detector was inert for a whole phase.
     @Optional() private readonly installs?: LicenseInstallService,
+    // §2.5 per-licence watermarking. @Optional: absent = unmarked bundles.
+    @Optional() private readonly watermarks?: WatermarkService,
   ) {}
 
   /**
@@ -170,6 +173,13 @@ export class DeliverySessionService {
     );
 
     const now = Math.floor(Date.now() / 1000);
+    // Resolve the digest this caller actually receives (see engine.sha256 below).
+    // Fails open to the base digest, so a watermarking problem can never stop a
+    // paying customer loading their editor.
+    const engineSha = resolved.plan === PREMIUM_PLAN && licence?.licId && this.watermarks
+      ? await this.watermarks.digestForLicence(delivery.bundleSha256, licence.licId)
+      : delivery.bundleSha256;
+
     const session = this.signer.sign({
       customer: licence?.customer?.id || 'anonymous',
       plan: resolved.plan,
@@ -205,8 +215,17 @@ export class DeliverySessionService {
         version: delivery.version,
         engine: {
           key: delivery.bundleKey,
-          sha256: delivery.bundleSha256,
-          url: this.bundleUrl(delivery.version, delivery.plan, delivery.bundleSha256),
+          // §2.5 — PREMIUM bundles are watermarked per licence, so a leaked
+          // copy is attributable. The digest here is what the loader verifies
+          // BEFORE executing, so it must be the watermarked one or every
+          // premium load would fail its integrity check.
+          //
+          // Free bundles are never watermarked: free users have nothing worth
+          // leaking, and they are the bulk of traffic — keeping their bundle
+          // byte-identical preserves the shared CDN cache the whole design
+          // depends on.
+          sha256: engineSha,
+          url: this.bundleUrl(delivery.version, delivery.plan, engineSha),
         },
       },
     };

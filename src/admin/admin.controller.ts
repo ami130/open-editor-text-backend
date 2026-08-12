@@ -25,6 +25,9 @@ import { CreateRoleDto, UpdateRoleDto } from './dto/role.dto';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 import { LicenseInstallService } from '../delivery/license-install.service';
 import { EntitlementEventsService } from '../delivery/entitlement-events.service';
+import { TraceBundleDto } from './dto/trace-bundle.dto';
+import { WatermarkService } from '../delivery/watermark.service';
+import { readWatermark, matchWatermark } from '../delivery/watermark';
 
 @Controller('admin/features')
 export class FeatureAdminController {
@@ -130,6 +133,8 @@ export class LicenseAdminController {
     @Optional() @Inject(LicenseInstallService) private readonly installsSvc?: LicenseInstallService,
     // §2.3 instant push on revoke/regenerate.
     @Optional() @Inject(EntitlementEventsService) private readonly events?: EntitlementEventsService,
+    // §2.5 — leaked-bundle attribution.
+    @Optional() @Inject(WatermarkService) private readonly watermarks?: WatermarkService,
   ) {}
 
   /**
@@ -231,6 +236,55 @@ export class LicenseAdminController {
     // up — a regenerate is exactly when a customer is watching.
     this.pushEntitlementChange(lic?.licId, 'changed');
     return lic;
+  }
+
+  /**
+   * §2.5 — TRACE A LEAKED BUNDLE back to the licence it was issued to.
+   *
+   * Paste the suspect bundle (or just its `oe-wm:` marker) and this reports
+   * which customer it came from. That is the entire point of watermarking: it
+   * turns "someone is redistributing our engine" into a specific, actionable,
+   * defensible answer rather than a guess.
+   *
+   * POST (not GET) because the body is a whole bundle, and because a leaked
+   * artefact should not end up in access logs or browser history as a URL.
+   *
+   * Requires license.read: it reveals which customer an artefact belongs to.
+   */
+  @Post('trace-bundle') @RequirePermissions('license.read')
+  async traceBundle(@Body() dto: TraceBundleDto) {
+    const token = readWatermark(dto.content);
+    if (!token) {
+      // No marker: either an unmarked (free/legacy) bundle, or one that was
+      // stripped. Say which, rather than implying nobody is responsible.
+      return {
+        matched: false,
+        token: null,
+        reason: 'no watermark found — a free/legacy bundle, or the marker was removed',
+      };
+    }
+    if (!this.watermarks?.enabled) {
+      return { matched: false, token, reason: 'watermarking is not configured on this server' };
+    }
+
+    // Scanning every licence is fine HERE: this is a rare, human-initiated
+    // admin action, not the hot path. (The serve endpoint deliberately does
+    // not scan — see WatermarkService.isKnownWatermark.)
+    const all = await this.licenses.list();
+    const licIds = all.map((l) => l.licId).filter(Boolean);
+    const licId = matchWatermark(dto.content, this.watermarks.traceSecret(), licIds);
+    if (!licId) {
+      return { matched: false, token, reason: 'watermark did not match any current licence' };
+    }
+    const licence = all.find((l) => l.licId === licId);
+    return {
+      matched: true,
+      token,
+      licId,
+      customer: licence?.customer ? { id: licence.customer.id, name: licence.customer.name, email: licence.customer.email } : null,
+      status: licence?.status ?? null,
+      plan: licence?.planName ?? null,
+    };
   }
 
   /** Best-effort §2.3 push. Never throws: an admin action must not fail

@@ -23,6 +23,7 @@ import { BundleUrlSigner } from './bundle-url-signer';
 import { LicenseInstallService } from './license-install.service';
 import { LicenseActivationService } from './license-activation.service';
 import { EntitlementEventsService } from './entitlement-events.service';
+import { WatermarkService } from './watermark.service';
 
 @Module({})
 export class DeliveryModule {
@@ -47,9 +48,9 @@ export class DeliveryModule {
       // the @Global LicensingModule, which owns EngineVersionService.
       controllers: [DeliverySessionController, EngineController],
       providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService,
-        EntitlementEventsService],
+        EntitlementEventsService, WatermarkService],
       exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService,
-        EntitlementEventsService],
+        EntitlementEventsService, WatermarkService],
     };
   }
 }

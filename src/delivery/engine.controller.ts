@@ -29,6 +29,7 @@
  */
 import {
   Controller, Get, Param, Query, Res, Headers, NotFoundException, Logger,
+  Optional, Inject,
 } from '@nestjs/common';
 import type { Response } from 'express';
 import { Public } from '../auth/decorators';
@@ -37,6 +38,8 @@ import { EngineVersionService } from '../licensing/engine-version.service';
 import { PREMIUM_PLAN } from './session.service';
 import { BundleUrlSigner } from './bundle-url-signer';
 import { isValidDigest } from './bundle-storage';
+import { BUNDLE_STORAGE, BundleStorage } from './bundle-storage';
+import { WatermarkService } from './watermark.service';
 
 /**
  * One year. The URL is content-addressed, so the bytes behind it can never
@@ -56,6 +59,9 @@ export class EngineController {
   constructor(
     private readonly versions: EngineVersionService,
     private readonly signer: BundleUrlSigner,
+    // §2.5 — watermarked premium variants live in storage, not the registry.
+    @Optional() @Inject(BUNDLE_STORAGE) private readonly storage?: BundleStorage,
+    @Optional() private readonly watermarks?: WatermarkService,
   ) {}
 
   /**
@@ -108,7 +114,29 @@ export class EngineController {
     // are real. Without this check, any stored bundle could be fetched under
     // any version/plan label — including a premium bundle requested under the
     // free plan's unsigned path, which would hand premium away for free.
-    const bundle = await this.versions.readBundle(version, plan, digest);
+    let bundle = await this.versions.readBundle(version, plan, digest);
+
+    /**
+     * §2.5 — a PREMIUM digest may be a per-licence WATERMARKED variant, which
+     * is deliberately not in the registry (registering one row per customer
+     * would defeat the point of a registry).
+     *
+     * The registry gate above is NOT weakened. This path is reachable only
+     * when:
+     *   1. plan === premium, so the R44 signature was already verified above —
+     *      meaning THIS SERVER issued this exact digest; a caller cannot invent
+     *      one, and
+     *   2. the digest exists in our own bundle storage.
+     *
+     * Together those are strictly stronger than "is it in the registry",
+     * because a signature proves provenance rather than mere membership.
+     */
+    if (!bundle && plan === PREMIUM_PLAN && this.watermarks && this.storage) {
+      if (await this.watermarks.isKnownWatermark(digest)) {
+        bundle = await this.storage.get(digest);
+      }
+    }
+
     if (!bundle) {
       this.log.warn(`bundle miss: ${version}/${plan}/${digest.slice(0, 12)}…`);
       throw new NotFoundException('unknown bundle');
