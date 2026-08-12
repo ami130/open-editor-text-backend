@@ -15,6 +15,12 @@ jobs:
   test:
     runs-on: ubuntu-latest
 
+    # Both repos are now checked out side by side, so every `run:` step must
+    # execute inside THIS repo rather than the parent workspace directory.
+    defaults:
+      run:
+        working-directory: open-editor-text-backend
+
     services:
       # Production builds its schema from migration files against MySQL, while
       # every other test uses sqljs + synchronize. Without a real MySQL here,
@@ -32,12 +38,38 @@ jobs:
           --health-retries=10
 
     steps:
+      # This repo is checked out into a directory NAMED for the repo, so the
+      # sibling checkout below lands next to it — reproducing the local layout
+      #     <parent>/open-editor-text-backend
+      #     <parent>/open-editor
+      # which six test files rely on via `../../open-editor/packages/...`.
       - uses: actions/checkout@v4
+        with:
+          path: open-editor-text-backend
+
+      # ⚠️ REQUIRED, not convenience. Six suites import the REAL entitlements
+      # verifier from the editor repo to prove the backend's signer and the
+      # editor's verifier agree. Without this checkout they fail to load
+      # entirely ("Failed to load url ../../open-editor/..."), which is exactly
+      # how CI's first-ever run failed: 340 tests passed and 6 FILES could not
+      # even be parsed.
+      #
+      # Copying or mocking those files would defeat the whole point — the test
+      # exists because the two implementations must not drift apart.
+      - uses: actions/checkout@v4
+        with:
+          repository: ami130/open-editor
+          path: open-editor
 
       - uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
+          # `defaults.working-directory` applies to `run:` steps ONLY — an
+          # action's own inputs are still resolved from the workspace root. With
+          # the repo now checked out into a subdirectory, the lockfile is no
+          # longer at the root and caching would fail to find it.
+          cache-dependency-path: open-editor-text-backend/package-lock.json
 
       - name: Install
         run: npm ci
