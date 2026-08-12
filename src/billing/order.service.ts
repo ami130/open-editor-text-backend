@@ -15,7 +15,9 @@
  *   • A self-serve buyer becomes a real CustomerEntity (upsert by email), so the
  *     admin sees them like any other customer.
  */
-import { Injectable, Inject, BadRequestException, NotFoundException, Logger } from '@nestjs/common';
+import {
+  Injectable, Inject, Optional, BadRequestException, NotFoundException, Logger,
+} from '@nestjs/common';
 import { Repository, DataSource } from 'typeorm';
 import { InjectRepository, InjectDataSource } from '@nestjs/typeorm';
 import { randomUUID } from 'node:crypto';
@@ -27,10 +29,13 @@ import { LicenseService } from '../licensing/license.service';
 import { effectiveTtlSeconds } from '../licensing/duration-policy';
 import { normalizeDomains, assertDomainsAcceptable } from '../licensing/domain-policy';
 import { EmailService } from './email.service';
+import { LicenseActivationService } from '../delivery/license-activation.service';
 
 export interface StartCheckoutInput {
   packageId: string;
   email: string;
+  /** Buyer's editor install id (§2.4 activation). Optional. */
+  installId?: string;
   name?: string;
   domains?: string[];
 }
@@ -47,6 +52,12 @@ export class OrderService {
     @InjectRepository(CustomerEntity) private readonly customers: Repository<CustomerEntity>,
     @Inject(LicenseService) private readonly licenses: LicenseService,
     @Inject(EmailService) private readonly email: EmailService,
+    // @Optional so billing still works where the delivery module is absent —
+    // activation is then simply not offered. Wiring is asserted by a probe test,
+    // not trusted: an @Optional() that silently resolves to undefined is how the
+    // anti-sharing detector stayed inert for an entire phase.
+    @Optional() @Inject(LicenseActivationService)
+    private readonly activations?: LicenseActivationService,
   ) {}
 
   /**
@@ -95,6 +106,8 @@ export class OrderService {
       refreshPolicy: pkg.refreshPolicy,
       customerEmail: email,
       customerName: (input.name || '').trim(),
+      // §2.4 — lets the buyer's own editor activate itself after payment.
+      installId: (input.installId || '').trim().slice(0, 128),
       domains,
       status: 'pending',
       license: null,
@@ -226,6 +239,16 @@ export class OrderService {
       // Transient (DB hiccup, etc.) — ledger rolled back, let Stripe retry.
       this.log.error(`fulfill: transient error on order ${order.id}: ${msg} — will retry`);
       throw e;
+    }
+
+    // §2.4 — arm the activation so the buyer's OWN editor can upgrade itself
+    // without pasting anything. Best-effort and deliberately AFTER the commit:
+    // the purchase is already complete and the key is already being emailed, so
+    // a failure here costs a convenience, never the sale.
+    if (order.installId && order.license?.licId && this.activations) {
+      await this.activations
+        .create(order.installId, order.license.licId)
+        .catch(() => undefined);
     }
 
     // Best-effort delivery — never fail fulfillment on a mail error (committed).

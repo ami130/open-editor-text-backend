@@ -37,6 +37,7 @@ import { SessionRequestDto, RefreshSessionDto } from './dto/session.dto';
 import { recordSessionUsage } from './usage-log';
 import { RefreshLogService } from '../portal/refresh-log.service';
 import { SharingDetectorService } from '../portal/sharing-detector.service';
+import { LicenseActivationService } from './license-activation.service';
 
 const T = loadThrottleConfig();
 
@@ -50,6 +51,9 @@ export class DeliverySessionController {
     // its absence must never stop a session being issued.
     @Optional() private readonly refreshLog?: RefreshLogService,
     @Optional() private readonly sharing?: SharingDetectorService,
+    // §2.4 activation. @Optional for the same reason; a probe test asserts it
+    // is actually injected rather than silently undefined.
+    @Optional() private readonly activations?: LicenseActivationService,
   ) {}
 
   @Throttle({ default: { ttl: T.authTtlMs, limit: T.authLimit } })
@@ -66,15 +70,39 @@ export class DeliverySessionController {
     // than guessing a version that may not exist.
     const defaults = await this.versions.defaultsFor('stable');
 
+    /**
+     * §2.4 ACTIVATION. A caller with NO key of their own may have just bought
+     * premium from inside this very editor. If a pending activation matches
+     * their install id, redeem it and continue as though they had presented the
+     * key all along — so the upgrade lands on THIS page load, with no pasting.
+     *
+     * Only for keyless callers, deliberately: a caller who already sent a key
+     * must never have it silently swapped for another.
+     *
+     * The claim is SINGLE-USE and expiring (see LicenseActivationService).
+     * That is not optional hardening — install ids are written to the logs
+     * below, so a standing "this id gets premium" mapping would make any log
+     * reader a permanent free customer.
+     */
+    let activatedKey: string | null = null;
+    if (!dto.licenceKey && dto.installId && this.activations) {
+      const licId = await this.activations.claim(dto.installId, origin);
+      if (licId) activatedKey = await this.sessions.keyForLicence(licId);
+    }
+
     const { session, refusal } = await this.sessions.open(
       {
-        licenceKey: dto.licenceKey ?? null,
+        licenceKey: dto.licenceKey ?? activatedKey ?? null,
         installId: dto.installId ?? null,
         version: dto.version ?? null,
         origin,
       },
       defaults,
     );
+
+    // Hand the key over exactly once, so the loader can store it and stop
+    // depending on the activation row. Only ever set on a successful claim.
+    if (activatedKey && session.plan !== 'free') session.licenceKey = activatedKey;
 
     // `refusal` is deliberately NOT in the response — surfacing it would turn
     // this endpoint into a key-validation oracle. It exists for server-side

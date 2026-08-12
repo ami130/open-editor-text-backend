@@ -14,12 +14,14 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { loadDatabaseConfig } from '../config/database.config';
 import { LicenseEntity } from '../licensing/entities/license.entity';
 import { LicenseInstallEntity } from './entities/license-install.entity';
+import { LicenseActivationEntity } from './entities/license-activation.entity';
 import { PortalModule } from '../portal/portal.module';
 import { DeliverySessionService } from './session.service';
 import { DeliverySessionController } from './session.controller';
 import { EngineController } from './engine.controller';
 import { BundleUrlSigner } from './bundle-url-signer';
 import { LicenseInstallService } from './license-install.service';
+import { LicenseActivationService } from './license-activation.service';
 
 @Module({})
 export class DeliveryModule {
@@ -31,7 +33,7 @@ export class DeliveryModule {
       module: DeliveryModule,
       imports: [
         // LicenseInstallEntity backs the §2.4 seat cap.
-        TypeOrmModule.forFeature([LicenseEntity, LicenseInstallEntity]),
+        TypeOrmModule.forFeature([LicenseEntity, LicenseInstallEntity, LicenseActivationEntity]),
         // For the anti-sharing fetch-log + detector on /delivery/refresh.
         // Sibling modules do not see each other's exports automatically, so
         // this import is what makes those @Optional() injections resolve —
@@ -43,8 +45,8 @@ export class DeliveryModule {
       // the premium ones (R44). DELIVERY_CONFIG and BUNDLE_STORAGE come from
       // the @Global LicensingModule, which owns EngineVersionService.
       controllers: [DeliverySessionController, EngineController],
-      providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService],
-      exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService],
+      providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService],
+      exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService],
     };
   }
 }

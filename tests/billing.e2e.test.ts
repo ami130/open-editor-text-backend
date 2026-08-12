@@ -221,6 +221,20 @@ describe('Phase F — self-serve billing', () => {
     expect((await post('/billing/checkout', { packageId: id, email: 'b@x.com' })).status).toBe(400);
   });
 
+  it('§2.4: a checkout with NO installId still works — activation is optional', async () => {
+    // Buying from a pricing page has no editor to read an install id from. That
+    // path must be completely unchanged.
+    const { id, priceCents } = await makePackage({ name: 'NoInstall', featureIds: ['export.pdf'], domainBound: false });
+    stripeState.nextSessionId = 'cs_noinstall';
+    const checkout = await post('/billing/checkout', { packageId: id, email: 'plain@buyer.com' });
+    expect(checkout.status).toBe(201);
+    const { sessionId } = await checkout.json();
+    expect((await postWebhook(completedEvent('evt_noinst_1', sessionId, '', priceCents, 'usd'))).status).toBe(201);
+    const fulfilled = await (await get(`/billing/orders/${sessionId}/license`)).json();
+    expect(fulfilled.status).toBe('fulfilled');
+    expect(fulfilled.licenseKey).toBeTruthy();
+  });
+
   it('FULL FLOW: checkout → paid webhook → license minted & verifies in the real verifier', async () => {
     const { id, priceCents } = await makePackage({ name: 'FlowPro', featureIds: ['export.pdf', 'export.docx'], domainBound: true });
     stripeState.nextSessionId = 'cs_flow';

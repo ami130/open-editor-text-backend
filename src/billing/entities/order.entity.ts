@@ -62,6 +62,17 @@ export class OrderEntity {
   @Column({ type: 'int', default: 0 })
   licenseTtlSeconds!: number;
 
+  /**
+   * The buyer's install id, captured at checkout (§2.4 activation). Empty when
+   * they bought outside the editor (a pricing page, an invoice) — activation is
+   * then simply not offered and the emailed key remains the only path.
+   *
+   * Stored on the ORDER because fulfilment is the only moment both the install
+   * id and the freshly-minted licence id exist together.
+   */
+  @Column({ type: 'varchar', length: 128, default: '' })
+  installId!: string;
+
   /** Snapshot of the package's billing interval at checkout (once/monthly/yearly/
    *  lifetime), so fulfillment + the Phase-4 refresh endpoint know the sold term
    *  even if the package is later edited. (Phase 3) */

@@ -669,6 +669,95 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect((await two.json()).message).toMatch(/allows 1 domain/i);
   });
 
+  it('§2.4 ACTIVATION: a purchased licence upgrades the buyer\'s OWN editor, no key pasted', async () => {
+    // The answer to "how does my package update automatically when I buy?".
+    // Before this the honest answer was "it doesn't — check your email and
+    // paste the key", and the editor the buyer was looking at stayed free.
+    //
+    // Driven through the real services (not the Stripe webhook, which lives in
+    // billing.e2e) because what is under test is the ACTIVATION handover, not
+    // payment: arm a claim exactly as fulfilment does, then prove the browser
+    // that owns that install id upgrades itself on its very next session.
+    const { LicenseActivationService } = await import('../src/delivery/license-activation.service');
+    const acts: any = app.get(LicenseActivationService, { strict: false });
+
+    const pkg = await (await post('/admin/packages', {
+      name: 'Activate Pro', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Activating Co', email: 'activating@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+
+    const install = `oe_${'ac'.repeat(16)}`;
+
+    // BEFORE the purchase is armed: this browser is free.
+    const before = await (await post('/delivery/session', { installId: install })).json();
+    expect(before.plan).toBe('free');
+    expect(before.licenceKey).toBeUndefined();
+
+    // Fulfilment arms the claim (exactly what order.service does post-payment).
+    expect(await acts.create(install, lic.licId)).toBe(true);
+
+    // The SAME browser, still sending no key of its own, is now premium — and
+    // is handed its key once so it can keep working after a reload.
+    const after = await (await post('/delivery/session', { installId: install })).json();
+    expect(after.plan).toBe('premium');
+    expect(after.licenceKey).toBeTruthy();
+
+    // THE SECURITY PROPERTY: the claim is spent. A replay — what anyone reading
+    // the install id out of the server logs would try — yields nothing.
+    const replay = await (await post('/delivery/session', { installId: install })).json();
+    expect(replay.plan).toBe('free');
+    expect(replay.licenceKey).toBeUndefined();
+
+    // And the handed-over key is the REAL one: usable on its own from now on,
+    // which is exactly what the loader stores and resends.
+    const reuse = await (await post('/delivery/session', {
+      installId: install, licenceKey: after.licenceKey,
+    })).json();
+    expect(reuse.plan).toBe('premium');
+    // Never echoed back to a caller who already had a key.
+    expect(reuse.licenceKey).toBeUndefined();
+  });
+
+  it('§2.4 ACTIVATION: a caller who ALREADY sent a key never has it swapped', async () => {
+    // An armed activation for this install must not override a key the caller
+    // explicitly supplied — that would silently move a user onto another
+    // licence, and could be used to downgrade someone deliberately.
+    const { LicenseActivationService } = await import('../src/delivery/license-activation.service');
+    const acts: any = app.get(LicenseActivationService, { strict: false });
+
+    const pkg = await (await post('/admin/packages', {
+      name: 'Own Key Pro', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Own Key Co', email: 'ownkey@example.com',
+    }, adminToken)).json();
+    const mine = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const other = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+
+    const install = `oe_${'bd'.repeat(16)}`;
+    await acts.create(install, other.licId);
+
+    const myKey = mine.token || mine.licenseKey || mine.key;
+    const r = await (await post('/delivery/session', { installId: install, licenceKey: myKey })).json();
+    expect(r.plan).toBe('premium');
+    expect(r.licenceKey).toBeUndefined();
+
+    // The claim was NOT consumed — it is still there for the browser that
+    // genuinely has no key yet.
+    expect(await acts.pendingFor(install)).toBeTruthy();
+  });
+
   it('SECURITY §2.4: a licence serves only its capped number of INSTALLS', async () => {
     // THE HOLE THIS CLOSES: domain binding exempts `localhost` so developers can
     // build without owning the customer's domain — but that exemption has no

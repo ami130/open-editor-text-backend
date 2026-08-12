@@ -17,4 +17,13 @@ export class CreateCheckoutDto {
   /** Domains for a domain-bound package (required by the service when bound). */
   @IsOptional() @IsArray() @IsString({ each: true })
   domains?: string[];
+
+  /**
+   * The install id shown in the buyer's editor (§2.4). When present, the
+   * running editor activates itself after payment instead of waiting for the
+   * key to be pasted. Optional: buying from a pricing page has no editor to
+   * read it from, and that path must keep working unchanged.
+   */
+  @IsOptional() @IsString() @Length(0, 128)
+  installId?: string;
 }

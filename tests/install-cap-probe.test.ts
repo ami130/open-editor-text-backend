@@ -95,6 +95,54 @@ describe('§2.4 wiring probe', () => {
     expect(ctrl.installsSvc).toBeDefined();
   });
 
+  it('ACTIVATION is single-use: a replayed install id yields NOTHING', async () => {
+    // THE SECURITY PROPERTY. installId is written to the server logs on every
+    // session (delivery/usage-log.ts). If a claim could be replayed, anyone who
+    // could read a log line would have permanent free premium — a worse hole
+    // than the localhost sharing this phase set out to close.
+    const { LicenseActivationService } = await import('../src/delivery/license-activation.service');
+    const acts: any = app.get(LicenseActivationService, { strict: false });
+    const install = 'oe_' + '7'.repeat(32);
+
+    expect(await acts.create(install, 'lic-abc')).toBe(true);
+    expect(await acts.claim(install, 'https://buyer.test')).toBe('lic-abc');
+    // Every subsequent attempt — the replay a log reader would make.
+    expect(await acts.claim(install, 'https://attacker.test')).toBeNull();
+    expect(await acts.claim(install, 'https://attacker.test')).toBeNull();
+  });
+
+  it('ACTIVATION expires: a stale claim is refused', async () => {
+    const { LicenseActivationService } = await import('../src/delivery/license-activation.service');
+    const acts: any = app.get(LicenseActivationService, { strict: false });
+    const install = 'oe_' + '8'.repeat(32);
+
+    await acts.create(install, 'lic-old');
+    // Redeem well past the TTL window.
+    const later = new Date(Date.now() + 1000 * 3600 * 24 * 30);
+    expect(await acts.claim(install, null, later)).toBeNull();
+  });
+
+  it('ACTIVATION fails CLOSED on a broken repository — never gives premium away', async () => {
+    // Opposite posture to the seat cap, deliberately. There, failing open
+    // protects a payer; here, failing open would hand out a licence we could
+    // not verify.
+    const { LicenseActivationService } = await import('../src/delivery/license-activation.service');
+    const broken = new LicenseActivationService({
+      findOne: async () => { throw new Error('db down'); },
+    } as any);
+    expect(await broken.claim('oe_' + '9'.repeat(32), null)).toBeNull();
+  });
+
+  it('the SESSION CONTROLLER and ORDER SERVICE really see the activation service', async () => {
+    // Both are siblings of DeliveryModule and neither sees its exports without
+    // importing it. BillingModule did not, and would have armed no activation
+    // at all while every purchase test still passed.
+    const { DeliverySessionController } = await import('../src/delivery/session.controller');
+    const { OrderService } = await import('../src/billing/order.service');
+    expect(app.get(DeliverySessionController, { strict: false }).activations).toBeDefined();
+    expect(app.get(OrderService, { strict: false }).activations).toBeDefined();
+  });
+
   it('fails OPEN: a broken repository must never downgrade a paying customer', async () => {
     const { LicenseInstallService } = await import('../src/delivery/license-install.service');
     const broken = new LicenseInstallService({

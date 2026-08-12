@@ -91,6 +91,19 @@ export interface SessionResponse {
    * mangling proxies, and poisoned caches.
    */
   engine: { key: string; sha256: string; url: string };
+
+  /**
+   * §2.4 ACTIVATION — the buyer's licence key, handed over exactly once.
+   *
+   * Present ONLY when this caller had no key of their own and a pending
+   * activation matched their install id (i.e. they just bought premium from
+   * inside this editor). The loader stores it and sends it on every later
+   * session, so this field appears once in a licence's whole lifetime.
+   *
+   * Absent on every other response — it is never echoed back to a caller who
+   * already supplied a key.
+   */
+  licenceKey?: string;
 }
 
 /** Why a session was refused. Never surfaced verbatim — see the controller. */
@@ -280,9 +293,19 @@ export class DeliverySessionService {
    * The stored licence token for a licence id, if the licence is still usable.
    *
    * Returns null for a missing, revoked, or expired licence so the caller
-   * degrades to the free tier rather than trusting a stale refresh token.
+   * degrades to the free tier rather than trusting a stale refresh token — and
+   * so §2.4 activation can never resurrect a dead licence.
+   *
+   * Reads the STORED token rather than re-signing. Re-signing would mint a
+   * SECOND valid credential for the same licence with a different lifetime,
+   * diverging from the key the customer was emailed and from `lic.token`, which
+   * the portal's refresh/regenerate flow treats as the single current key.
+   *
+   * Public (was private) because the session controller needs it to hand a key
+   * to a browser redeeming an activation claim.
    */
-  private async keyForLicence(licId: string): Promise<string | null> {
+  async keyForLicence(licId: string): Promise<string | null> {
+    if (!licId) return null;
     const licence = await this.licences.findOne({ where: { licId } });
     if (!licence || licence.status === 'revoked' || licence.isExpired()) return null;
     return licence.token || null;

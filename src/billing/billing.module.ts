@@ -20,6 +20,7 @@ import { OrderService } from './order.service';
 import { BillingController } from './billing.controller';
 import { PublicController } from './public.controller';
 import { OrderAdminController, LicenseEmailAdminController } from './order-admin.controller';
+import { DeliveryModule } from '../delivery/delivery.module';
 
 @Module({})
 export class BillingModule {
@@ -30,6 +31,12 @@ export class BillingModule {
         TypeOrmModule.forFeature([
           OrderEntity, ProcessedStripeEventEntity, PackageEntity, CustomerEntity,
         ]),
+        // §2.4 — LicenseActivationService, so fulfilment can arm the buyer's
+        // one-time activation claim. Sibling modules do NOT see each other's
+        // exports: without this import the @Optional() injection resolves to
+        // `undefined` and activation would silently never be armed, while every
+        // test of the purchase flow still passed.
+        DeliveryModule.forRoot(),
       ],
       controllers: [BillingController, PublicController, OrderAdminController, LicenseEmailAdminController],
       providers: [
