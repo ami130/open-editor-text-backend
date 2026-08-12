@@ -16,6 +16,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Test } from '@nestjs/testing';
 import type { INestApplication } from '@nestjs/common';
 import cookieParser from 'cookie-parser';
+import { json, urlencoded } from 'express';
 import { AppModule } from '../src/app.module';
 import { STRIPE_CLIENT, type StripeClient, type CheckoutSessionInput } from '../src/billing/stripe.service';
 import { getRepositoryToken } from '@nestjs/typeorm';
@@ -83,8 +84,26 @@ beforeAll(async () => {
   const mod = await Test.createTestingModule({ imports: [AppModule.forRoot()] })
     .overrideProvider(STRIPE_CLIENT).useValue(fakeStripe)
     .compile();
-  // rawBody:true so the webhook can read req.rawBody (mirrors production main.ts).
+  /**
+   * ⚠️ MIRROR main.ts. rawBody:true ALONE IS NOT ENOUGH.
+   *
+   * Production also installs `json()`/`urlencoded()` for the bundle-upload
+   * limit. A body parser consumes the stream, so without the `verify` hook that
+   * stashes the buffer, `req.rawBody` is undefined and EVERY Stripe webhook
+   * fails 400 — payments succeed while orders sit `pending` and no licence is
+   * ever minted.
+   *
+   * This test app previously enabled rawBody but installed NO parser, so the
+   * suite passed for months against a production config that was broken. The
+   * parsers below exist to reproduce production's ordering, not because the
+   * tests need them.
+   */
   app = mod.createNestApplication({ logger: false, rawBody: true });
+  const keepRawBody = (req: any, _res: unknown, buf: Buffer) => {
+    if (buf?.length) req.rawBody = buf;
+  };
+  app.use(json({ limit: '2mb', verify: keepRawBody }));
+  app.use(urlencoded({ extended: true, limit: '2mb', verify: keepRawBody }));
   app.use(cookieParser());
   await app.listen(0);
   base = (await app.getUrl()).replace('[::1]', '127.0.0.1');
@@ -219,6 +238,35 @@ describe('Phase F — self-serve billing', () => {
   it('rejects a domain-bound checkout with no domain (400)', async () => {
     const { id } = await makePackage({ name: 'BoundReq', domainBound: true });
     expect((await post('/billing/checkout', { packageId: id, email: 'b@x.com' })).status).toBe(400);
+  });
+
+  it('§2.4 REGRESSION: checkout PERSISTS installId onto the order', async () => {
+    // A live purchase produced an order with installId='' while every unit test
+    // passed: the DTO validated the field, the entity had the column, and the
+    // controller destructured an explicit list that simply omitted it — so it
+    // was dropped between validation and persistence.
+    //
+    // Asserting on the STORED ORDER (not the response) is the point: that is
+    // the value fulfilment later reads to arm the activation claim.
+    const { id, priceCents } = await makePackage({ name: 'PersistInstall', featureIds: ['export.pdf'], domainBound: false });
+    const install = `oe_${'ab'.repeat(16)}`;
+    stripeState.nextSessionId = 'cs_persist_install';
+    const res = await post('/billing/checkout', {
+      packageId: id, email: 'persist@buyer.com', installId: install,
+    });
+    expect(res.status).toBe(201);
+    const { sessionId } = await res.json();
+
+    const orders = app.get(getRepositoryToken(OrderEntity));
+    const saved = await orders.findOne({ where: { stripeSessionId: sessionId } });
+    expect(saved).toBeTruthy();
+    expect(saved.installId).toBe(install);
+
+    // …and it must survive fulfilment, which is when the claim is armed.
+    expect((await postWebhook(completedEvent('evt_persist_1', sessionId, '', priceCents, 'usd'))).status).toBe(201);
+    const after = await orders.findOne({ where: { stripeSessionId: sessionId } });
+    expect(after.installId).toBe(install);
+    expect(after.status).toBe('fulfilled');
   });
 
   it('§2.4: a checkout with NO installId still works — activation is optional', async () => {

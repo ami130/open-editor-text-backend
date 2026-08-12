@@ -14,6 +14,8 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { json, urlencoded } from 'express';
+import type { Request } from 'express';
+import type { RawBodyRequest } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { loadAiConfig } from './config/ai.config';
 import { loadDatabaseConfig } from './config/database.config';
@@ -57,8 +59,26 @@ async function bootstrap() {
   // is ~854 KB base64, which Express's 100 KB default would reject with an
   // opaque 413. Only the admin publish route needs this; the limit is kept
   // tight enough that it is not a useful amplification target.
-  app.use(json({ limit: BUNDLE_UPLOAD_LIMIT }));
-  app.use(urlencoded({ extended: true, limit: BUNDLE_UPLOAD_LIMIT }));
+  //
+  // ⚠️ THE WEBHOOK MUST KEEP ITS RAW BYTES. Stripe signs the EXACT body it
+  // sent; verification re-computes an HMAC over those bytes. A JSON parser that
+  // consumes the stream first leaves `req.rawBody` undefined and every webhook
+  // fails 400 — payments succeed at Stripe while orders sit `pending` forever
+  // and no licence is ever minted.
+  //
+  // `verify` is the documented body-parser hook that sees the buffer BEFORE
+  // parsing, so we stash it ourselves. This is more robust than skipping the
+  // parser for the webhook path: it keeps one parser (no route-ordering
+  // subtleties) and works no matter where the route is mounted.
+  //
+  // Found by driving a REAL signed webhook against the running server. Every
+  // e2e test passed throughout, because the test app enables rawBody but never
+  // installs this parser — so the tests never reproduced production's ordering.
+  const keepRawBody = (req: RawBodyRequest<Request>, _res: unknown, buf: Buffer) => {
+    if (buf?.length) req.rawBody = buf;
+  };
+  app.use(json({ limit: BUNDLE_UPLOAD_LIMIT, verify: keepRawBody }));
+  app.use(urlencoded({ extended: true, limit: BUNDLE_UPLOAD_LIMIT, verify: keepRawBody }));
 
   // NOTE: the global ValidationPipe is registered as an APP_PIPE provider in
   // SecurityModule (so prod + tests share the exact same validation, no drift).

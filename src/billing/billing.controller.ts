@@ -46,8 +46,17 @@ export class BillingController {
       throw new ServiceUnavailableException('billing is not configured');
     }
     // Validate + snapshot the authoritative price into a pending order.
+    // ⚠️ Explicit field list — anything omitted here is SILENTLY DROPPED even
+    // though the DTO validated it. That is exactly how §2.4's installId went
+    // missing: every unit test passed, the column existed, the service handled
+    // it, and a live purchase still produced an order with installId=''.
     const { order } = await this.orders.prepareOrder({
-      packageId: dto.packageId, email: dto.email, name: dto.name, domains: dto.domains,
+      packageId: dto.packageId,
+      email: dto.email,
+      name: dto.name,
+      domains: dto.domains,
+      // §2.4 — lets the buyer's own editor activate itself after payment.
+      installId: dto.installId,
     });
     // Create the Stripe EMBEDDED session, then bind its id to our order.
     const session = await this.stripe.createCheckoutSession({
