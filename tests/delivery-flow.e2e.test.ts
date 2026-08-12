@@ -758,6 +758,121 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(await acts.pendingFor(install)).toBeTruthy();
   });
 
+  it('STAGE 1: the served bundle follows the BUILD\'s capabilities, not a name prefix', async () => {
+    // THE DEFECT: the plan is inferred from a string prefix —
+    //     plan = features.some(f => f.startsWith('export.')) ? 'premium' : 'free'
+    //
+    // WHY IT HAS NOT BITTEN YET (measured, not assumed): of 55 sellable
+    // features, exactly TWO are premium — export.pdf and export.docx — and both
+    // happen to start with 'export.'. Every other premium feature (seo, ai.*,
+    // collab, comments…) is currently `sellable: false`, so an admin cannot
+    // build a package that exposes the flaw.
+    //
+    // That is LUCK, not safety. The prefix rule encodes a coincidence of naming
+    // as a business rule. Re-enable AI or collaboration for sale — which is the
+    // whole point of admin-defined packages — and a paying customer is served
+    // the FREE bundle, which does not contain the code they bought.
+    //
+    // This test pins the CORRECT rule so the fix is real and cannot regress:
+    // a package is served the smallest bundle that actually supports its
+    // features, decided from the registry's supportedFeatures.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Pdf Plan', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    expect(pkg.id).toBeTruthy();
+
+    const cust = await (await post('/admin/customers', {
+      name: 'Pdf Co', email: 'pdf-plan@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    const sess = await (await post('/delivery/session', { licenceKey: key })).json();
+    // Served a bundle that genuinely CONTAINS what was sold.
+    expect(sess.plan).toBe('premium');
+    expect(sess.features).toContain('export.pdf');
+  });
+
+  it('STAGE 1: a NON-export premium feature now resolves correctly (the prefix rule could not)', async () => {
+    // The case the old rule was structurally blind to: a feature that only the
+    // PREMIUM build supports but whose id does NOT start with 'export.'.
+    //
+    // `tools.speech` is used because it is SELLABLE. Every catalog feature
+    // marked kind:'premium' other than export.pdf/docx is currently
+    // sellable:false, so no real premium feature can demonstrate this today —
+    // which is precisely why the prefix bug has stayed hidden. Here the fixture
+    // makes the build pair itself the source of truth, which is exactly what
+    // the new rule reads.
+    //
+    // Published as its own version so this test owns its fixture and cannot be
+    // affected by, or affect, the shared 1.3.0 build.
+    const V = '5.5.0';
+    await post('/admin/engine/versions', {
+      version: V, plan: 'free',
+      supportedFeatures: ['text.bold', 'text.italic'],
+      bundleKey: `engine/${V}/free.js`, bundleSha256: SHA_A,
+      bundleBytes: FREE_BYTES.length, bundleBase64: FREE_BYTES.toString('base64'),
+    }, adminToken);
+    await post('/admin/engine/versions', {
+      version: V, plan: 'premium',
+      // Premium-only AND not named 'export.*' — exactly the blind spot.
+      supportedFeatures: ['text.bold', 'text.italic', 'tools.speech'],
+      bundleKey: `engine/${V}/premium.js`, bundleSha256: SHA_B,
+      bundleBytes: PREMIUM_BYTES.length, bundleBase64: PREMIUM_BYTES.toString('base64'),
+    }, adminToken);
+    await patch(`/admin/engine/versions/${V}/channel`, { channel: 'stable' }, adminToken);
+
+    const pkg = await (await post('/admin/packages', {
+      name: 'History Plan', priceCents: 9900, billingInterval: 'monthly',
+      featureIds: ['tools.speech'], domainBound: false,
+    }, adminToken)).json();
+    expect(pkg.id).toBeTruthy();
+
+    const cust = await (await post('/admin/customers', {
+      name: 'History Co', email: 'history-plan@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      // NOTE: pinnedVersion is NOT accepted by IssueLicenseDto today, so it
+      // cannot be set here — the caller-supplied `version` below is what pins
+      // this session (session.service.ts treats it as the pin when the licence
+      // has none of its own).
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    // Pin the caller to V so the assertion is about THIS build pair.
+    const sess = await (await post('/delivery/session', { licenceKey: key, version: V })).json();
+
+    // Under the old prefix rule this was 'free' and versionHistory was absent.
+    expect(sess.version).toBe(V);
+    expect(sess.plan).toBe('premium');
+    expect(sess.features).toContain('tools.speech');
+  });
+
+  it('STAGE 1: a FREE-only package is served the free bundle (no over-serving)', async () => {
+    // The other direction matters too: a package whose features are all
+    // supported by the free build must NOT be handed the premium bundle. That
+    // would waste bandwidth and hand premium code to someone who did not buy it.
+    const pkg = await (await post('/admin/packages', {
+      name: 'Basic Text', priceCents: 1900, billingInterval: 'monthly',
+      featureIds: ['text.bold', 'text.italic'], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Basic Co', email: 'basic-plan@example.com',
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    const sess = await (await post('/delivery/session', { licenceKey: key })).json();
+    expect(sess.plan).toBe('free');
+    expect(sess.features).toEqual(expect.arrayContaining(['text.bold', 'text.italic']));
+  });
+
   it('§2.7 CANARY: a gradual release reaches only its slice, stickily', async () => {
     // Today a release goes to 100% at once, so a bad build reaches everyone
     // before anyone notices. A canary contains the blast radius.

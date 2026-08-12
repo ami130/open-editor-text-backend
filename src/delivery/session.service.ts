@@ -146,7 +146,9 @@ export class DeliverySessionService {
     defaults: { channelDefault?: string | null; globalDefault?: string | null },
   ): Promise<{ session: SessionResponse; refusal?: SessionRefusal }> {
     const resolved = req.licenceKey
-      ? await this.resolveLicensed(req)
+      // Defaults are threaded in so the PLAN is decided against the very build
+      // the version chain is about to resolve — no second lookup, no drift.
+      ? await this.resolveLicensed({ ...req, ...defaults })
       // No key → the free tier. ALL_BUILD_FEATURES, not [] — see the sentinel's
       // docstring: an empty list would intersect to nothing and hand the user a
       // free bundle with every feature disabled.
@@ -349,7 +351,9 @@ export class DeliverySessionService {
    * features added to their plan after purchase. The snapshot is used only as a
    * fallback for legacy rows with no package relation.
    */
-  private async resolveLicensed(req: SessionRequest): Promise<{
+  private async resolveLicensed(
+    req: SessionRequest & { channelDefault?: string | null; globalDefault?: string | null },
+  ): Promise<{
     plan: string;
     features: string[];
     licence: LicenseEntity | null;
@@ -392,10 +396,42 @@ export class DeliverySessionService {
       ? licence.package.features.map((f) => f.id)
       : licence.features; // legacy rows with no package relation
 
-    // Any licence granting a premium feature receives the premium bundle. Which
-    // of those features are actually usable is decided by the intersection in
-    // EngineVersionService, not here.
-    const plan = features.some((f) => f.startsWith('export.')) ? PREMIUM_PLAN : FREE_PLAN;
+    /**
+     * STAGE 1 — the served bundle follows what the BUILD supports, not a name.
+     *
+     * This used to be `features.some(f => f.startsWith('export.'))`, which
+     * encoded a coincidence of naming as a business rule. It is correct today
+     * only because the two sellable premium features happen to be called
+     * `export.pdf` and `export.docx`; every other premium feature is currently
+     * non-sellable, so the flaw is invisible. The moment an admin can sell one
+     * (AI, comments, collab — the entire point of admin-defined packages) a
+     * paying customer is served the FREE bundle, which does not contain the
+     * code they bought, and the feature silently does nothing.
+     *
+     * `planForFeatures` answers the real question instead: which is the
+     * smallest build that actually supports everything this package grants?
+     *
+     * The version used here is the LICENCE-LEVEL one only. A caller-supplied
+     * `version` is deliberately ignored for this decision — otherwise a client
+     * could name a version whose free build happens to cover its features and
+     * talk itself into a cheaper bundle.
+     *
+     * With no licence-level pin we use the defaults ALREADY RESOLVED by the
+     * caller and threaded in — not a fresh lookup. Re-fetching them here would
+     * add two queries per licensed session and, worse, could disagree with the
+     * version the chain actually picks if a default moved in between.
+     */
+    const versionForPlan = licence.pinnedVersion
+      || licence.overrideVersion
+      || req.channelDefault
+      || req.globalDefault;
+    const plan = versionForPlan
+      ? await this.versions.planForFeatures(versionForPlan, features)
+      // No resolvable version yet (nothing published). Fall back to the RICHER
+      // plan: over-serving costs bandwidth, under-serving silently removes paid
+      // features, and only one of those is recoverable without a support ticket.
+      : PREMIUM_PLAN;
+
     return { plan, features, licence };
   }
 

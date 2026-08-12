@@ -47,8 +47,25 @@ function fakeSigner(validKeys: Record<string, any> = {}) {
 }
 
 /** Version service stub — the real one is tested in engine-version-service.test.ts. */
-function fakeVersions(supported: string[] = ['text.bold', 'export.pdf']) {
+/**
+ * `freeSupported` models what the FREE build can do, so the stub can answer
+ * `planForFeatures` the way the real registry does (STAGE 1): serve the
+ * smallest build that supports everything the package grants.
+ *
+ * Previously this stub modelled ONE build, which is why it could not express
+ * the free/premium decision at all — the production code inferred that from a
+ * string prefix instead.
+ */
+function fakeVersions(
+  supported: string[] = ['text.bold', 'export.pdf'],
+  freeSupported: string[] = ['text.bold'],
+) {
   return {
+    planForFeatures: async (_version: string, features: string[]) => {
+      const wanted = (features || []).filter((f) => f && f !== '*');
+      if (!wanted.length) return 'free';
+      return wanted.every((f) => freeSupported.includes(f)) ? 'free' : 'premium';
+    },
     resolveForLicence: async (input: any) => ({
       version: input.pinnedVersion || '1.3.0',
       plan: input.plan,

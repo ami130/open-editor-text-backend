@@ -32,11 +32,21 @@ import { EngineCanaryEntity } from './entities/engine-canary.entity';
 import { inCanary } from './canary';
 import {
   resolveVersion, resolveFeatures, missingFromBuild, channelAllows,
-  eligibleAsDefault,
+  eligibleAsDefault, ALL_FEATURES,
 } from './version-resolution';
 
 /** Plans that must have a build before a version may be published. */
 export const REQUIRED_PLANS = ['free', 'premium'] as const;
+
+/**
+ * The plan served when the registry cannot decide (missing rows, DB error, or a
+ * package whose features no single build fully covers).
+ *
+ * Deliberately the RICHER plan: over-serving costs bandwidth, under-serving
+ * silently removes features a customer paid for. Only one of those is
+ * recoverable without a support ticket.
+ */
+export const PREMIUM_FALLBACK_PLAN = 'premium';
 
 export interface PublishBuildInput {
   version: string;
@@ -236,6 +246,66 @@ export class EngineVersionService {
     }
     await this.setDefault(scope, target, { ...audit, kind: 'rollback' });
     return { scope, from: current?.version || '', to: target };
+  }
+
+  /**
+   * STAGE 1 — which bundle must this package be served?
+   *
+   * ─── WHY THIS REPLACED A STRING PREFIX ──────────────────────────────────
+   * The plan used to be inferred as:
+   *
+   *     plan = features.some(f => f.startsWith('export.')) ? 'premium' : 'free'
+   *
+   * That encodes a COINCIDENCE OF NAMING as a business rule. It happens to be
+   * correct today only because the two sellable premium features are named
+   * `export.pdf` and `export.docx`. Every other premium feature (seo, ai.*,
+   * comments, collab) is currently non-sellable, so the flaw is invisible —
+   * which is luck, not safety. The moment an admin can sell any of those, a
+   * paying customer is served the FREE bundle, which does not contain the code
+   * they bought, and the feature silently does nothing.
+   *
+   * ─── THE RULE ───────────────────────────────────────────────────────────
+   * Serve the SMALLEST bundle that actually supports every feature the package
+   * grants. That is decided from the registry's `supportedFeatures` — the same
+   * data the entitlement intersection already trusts (T14) — so the answer
+   * follows what the build genuinely contains rather than what a name suggests.
+   *
+   * Naturally extends beyond two plans: adding a third bundle later needs no
+   * change here, because the question is "which build covers these features?",
+   * not "is this premium?".
+   *
+   * ─── FAILS TOWARD THE CUSTOMER ──────────────────────────────────────────
+   * If the registry cannot answer (no rows for this version, DB hiccup), we
+   * return the RICHER plan rather than the cheaper one. Over-serving costs
+   * bandwidth; under-serving silently breaks a paying customer's features, and
+   * of the two only one is recoverable without a support ticket.
+   */
+  async planForFeatures(version: string, packageFeatures: readonly string[]): Promise<string> {
+    const wanted = (packageFeatures || []).filter((f) => f && f !== ALL_FEATURES);
+    // Nothing specific requested → the free build is sufficient by definition.
+    if (!wanted.length) return 'free';
+
+    try {
+      const rows = await this.versions.find({ where: { version } });
+      if (!rows.length) return PREMIUM_FALLBACK_PLAN;
+
+      // Cheapest-first, so a package is never handed more bundle than it needs.
+      const ordered = [...rows].sort(
+        (a, b) => (a.plan === 'free' ? -1 : 1) - (b.plan === 'free' ? -1 : 1),
+      );
+      for (const row of ordered) {
+        const supported = new Set(row.supportedFeatures || []);
+        if (wanted.every((f) => supported.has(f))) return row.plan;
+      }
+      // No single build covers everything the package grants. Serve the richest
+      // one: the intersection (T14) will still bound what the token promises,
+      // so the customer gets everything that CAN be delivered rather than
+      // dropping to free and losing features that were available.
+      return PREMIUM_FALLBACK_PLAN;
+    } catch (err) {
+      this.log.warn(`planForFeatures failed for ${version}; serving ${PREMIUM_FALLBACK_PLAN}: ${String(err)}`);
+      return PREMIUM_FALLBACK_PLAN;
+    }
   }
 
   // ── §2.7 gradual release (canary) ─────────────────────────────────────────
