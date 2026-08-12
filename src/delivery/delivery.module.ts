@@ -22,6 +22,7 @@ import { EngineController } from './engine.controller';
 import { BundleUrlSigner } from './bundle-url-signer';
 import { LicenseInstallService } from './license-install.service';
 import { LicenseActivationService } from './license-activation.service';
+import { EntitlementEventsService } from './entitlement-events.service';
 
 @Module({})
 export class DeliveryModule {
@@ -45,8 +46,10 @@ export class DeliveryModule {
       // the premium ones (R44). DELIVERY_CONFIG and BUNDLE_STORAGE come from
       // the @Global LicensingModule, which owns EngineVersionService.
       controllers: [DeliverySessionController, EngineController],
-      providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService],
-      exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService],
+      providers: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService,
+        EntitlementEventsService],
+      exports: [DeliverySessionService, BundleUrlSigner, LicenseInstallService, LicenseActivationService,
+        EntitlementEventsService],
     };
   }
 }

@@ -26,9 +26,9 @@
  * A customer whose subscription lapsed mid-session gets a working FREE editor,
  * not a blank page or an error. Downgrade, never break.
  */
-import { Controller, Post, Body, Query, Req, HttpCode, Optional } from '@nestjs/common';
+import { Controller, Post, Get, Body, Query, Req, Res, HttpCode, Optional } from '@nestjs/common';
 import { Throttle } from '@nestjs/throttler';
-import type { Request } from 'express';
+import type { Request, Response } from 'express';
 import { Public } from '../auth/decorators';
 import { loadThrottleConfig } from '../config/throttle.config';
 import { DeliverySessionService } from './session.service';
@@ -38,6 +38,7 @@ import { recordSessionUsage } from './usage-log';
 import { RefreshLogService } from '../portal/refresh-log.service';
 import { SharingDetectorService } from '../portal/sharing-detector.service';
 import { LicenseActivationService } from './license-activation.service';
+import { EntitlementEventsService } from './entitlement-events.service';
 
 const T = loadThrottleConfig();
 
@@ -54,7 +55,85 @@ export class DeliverySessionController {
     // §2.4 activation. @Optional for the same reason; a probe test asserts it
     // is actually injected rather than silently undefined.
     @Optional() private readonly activations?: LicenseActivationService,
+    // §2.3 instant upgrade push.
+    @Optional() private readonly events?: EntitlementEventsService,
   ) {}
+
+  /**
+   * GET /delivery/events — the §2.3 push channel (Server-Sent Events).
+   *
+   * An editor holds this open and re-checks /session the moment its
+   * entitlement changes, instead of waiting up to 15 minutes for its timer.
+   *
+   * ⚠️ THE STREAM CARRIES NO CREDENTIALS. Every message is `{reason}` and
+   * nothing more — "something changed, go ask /session again". A subscriber is
+   * identified by a licId or installId, and NEITHER IS A SECRET (installIds are
+   * written to our own logs). If this stream carried a key, anyone who learned
+   * an id could listen and be handed a licence. Because it carries only a
+   * nudge, an eavesdropper learns at most that something changed and must still
+   * present the real credential to /session to get anything.
+   *
+   * SSE rather than WebSockets: one-way is all this needs, it survives proxies
+   * that mangle upgrades, and the browser reconnects on its own — so a dropped
+   * connection self-heals without any client logic.
+   *
+   * PUSH IS NEVER THE GUARANTEE. The engine's timed refresh remains
+   * authoritative (§1.3 + D1); a missed event costs latency, never entitlement.
+   */
+  @Throttle({ default: { ttl: T.authTtlMs, limit: T.authLimit } })
+  @Public()
+  @Get('events')
+  events_(
+    @Query('lic') lic: string | undefined,
+    @Query('installId') installId: string | undefined,
+    @Req() req: Request,
+    @Res() res: Response,
+  ): void {
+    const channel = (lic || installId || '').trim();
+    if (!this.events || !channel) {
+      // Nothing to subscribe to → 204 rather than an error. The editor simply
+      // keeps using its timer, which is the normal path anyway.
+      res.status(204).end();
+      return;
+    }
+
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache, no-transform',
+      Connection: 'keep-alive',
+      // Nginx and friends buffer streamed responses by default, which delays
+      // or swallows events entirely. This is the documented opt-out.
+      'X-Accel-Buffering': 'no',
+    });
+    res.write(': connected\n\n');
+
+    const send = (evt: { reason: string }) => {
+      // Only the reason crosses the wire. See the warning above.
+      res.write(`data: ${JSON.stringify({ reason: evt.reason })}\n\n`);
+    };
+
+    const unsubscribe = this.events.subscribe(channel, send);
+    if (!unsubscribe) {
+      // Cap reached — close cleanly so the client falls back to its timer.
+      res.end();
+      return;
+    }
+
+    // Comment-only heartbeat: keeps proxies and load balancers from reaping an
+    // idle connection, and costs 2 bytes. Not an event, so clients ignore it.
+    const heartbeat = setInterval(() => {
+      try { res.write(': ping\n\n'); } catch { /* closed */ }
+    }, 25_000);
+
+    const cleanup = () => {
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    // BOTH events: 'close' fires when the client goes away, 'error' on a broken
+    // pipe. Missing either leaks a listener and an interval per dropped tab.
+    req.on('close', cleanup);
+    req.on('error', cleanup);
+  }
 
   @Throttle({ default: { ttl: T.authTtlMs, limit: T.authLimit } })
   @Public()

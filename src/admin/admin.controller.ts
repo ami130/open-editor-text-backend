@@ -24,6 +24,7 @@ import { IssueLicenseDto, RenewLicenseDto } from './dto/license.dto';
 import { CreateRoleDto, UpdateRoleDto } from './dto/role.dto';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 import { LicenseInstallService } from '../delivery/license-install.service';
+import { EntitlementEventsService } from '../delivery/entitlement-events.service';
 
 @Controller('admin/features')
 export class FeatureAdminController {
@@ -127,6 +128,8 @@ export class LicenseAdminController {
     // @Optional: a deployment without the delivery module still serves every
     // other licence route; the seat endpoints simply report nothing.
     @Optional() @Inject(LicenseInstallService) private readonly installsSvc?: LicenseInstallService,
+    // §2.3 instant push on revoke/regenerate.
+    @Optional() @Inject(EntitlementEventsService) private readonly events?: EntitlementEventsService,
   ) {}
 
   /**
@@ -194,8 +197,21 @@ export class LicenseAdminController {
     return this.licenses.renew(id, dto.ttlSeconds);
   }
 
+  /**
+   * Revoke, then §2.3-push so an open editor drops premium in ~2s instead of
+   * keeping it until its refresh timer fires (up to 15 min).
+   *
+   * Published from the CONTROLLER, not LicenseService, on purpose: delivery
+   * already imports licensing (session.service reads licences), so injecting a
+   * delivery service INTO licensing would close a dependency cycle. The
+   * controller is the natural seam — it may depend on both.
+   */
   @Post(':id/revoke') @RequirePermissions('license.revoke')
-  revoke(@Param('id') id: string) { return this.licenses.revoke(id); }
+  async revoke(@Param('id') id: string) {
+    const lic = await this.licenses.revoke(id);
+    this.pushEntitlementChange(lic?.licId, 'revoked');
+    return lic;
+  }
 
   /** Dismiss the anti-sharing soft flag (Phase 5c) — admin reviewed + deemed it
    *  legitimate. Uses license.revoke permission (same reviewer authority). */
@@ -208,7 +224,21 @@ export class LicenseAdminController {
    * only issue, cannot do this composite action.
    */
   @Post(':id/regenerate') @RequirePermissions('license.revoke', 'license.issue')
-  regenerate(@Param('id') id: string) { return this.licenses.regenerate(id); }
+  async regenerate(@Param('id') id: string) {
+    const lic = await this.licenses.regenerate(id);
+    // The OLD key is dead the moment this returns. Nudge the open editor so it
+    // fetches the new one rather than failing refreshes until its timer catches
+    // up — a regenerate is exactly when a customer is watching.
+    this.pushEntitlementChange(lic?.licId, 'changed');
+    return lic;
+  }
+
+  /** Best-effort §2.3 push. Never throws: an admin action must not fail
+   *  because nobody happened to be listening, or because push is unavailable. */
+  private pushEntitlementChange(licId: string | undefined, reason: 'changed' | 'revoked'): void {
+    if (!licId || !this.events) return;
+    try { this.events.publish(licId, reason); } catch { /* optimisation only */ }
+  }
 
   /**
    * Seats (§2.4) — which browser installs have used this licence.

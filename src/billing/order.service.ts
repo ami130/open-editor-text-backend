@@ -30,6 +30,7 @@ import { effectiveTtlSeconds } from '../licensing/duration-policy';
 import { normalizeDomains, assertDomainsAcceptable } from '../licensing/domain-policy';
 import { EmailService } from './email.service';
 import { LicenseActivationService } from '../delivery/license-activation.service';
+import { EntitlementEventsService } from '../delivery/entitlement-events.service';
 
 export interface StartCheckoutInput {
   packageId: string;
@@ -58,6 +59,9 @@ export class OrderService {
     // anti-sharing detector stayed inert for an entire phase.
     @Optional() @Inject(LicenseActivationService)
     private readonly activations?: LicenseActivationService,
+    // §2.3 instant upgrade push.
+    @Optional() @Inject(EntitlementEventsService)
+    private readonly events?: EntitlementEventsService,
   ) {}
 
   /**
@@ -249,6 +253,21 @@ export class OrderService {
       await this.activations
         .create(order.installId, order.license.licId)
         .catch(() => undefined);
+    }
+
+    // §2.3 — nudge any editor already open for this buyer so it upgrades in
+    // ~2s instead of waiting for its refresh timer. Published on BOTH channels
+    // because at this instant the browser may know either identity: a fresh
+    // purchase only has its installId, an existing customer has the licId.
+    //
+    // Best-effort and non-blocking by design: push is an optimisation, and the
+    // timed refresh remains the guarantee. A failure here must never affect a
+    // completed sale.
+    if (this.events) {
+      try {
+        if (order.installId) this.events.publish(order.installId, 'purchased');
+        if (order.license?.licId) this.events.publish(order.license.licId, 'purchased');
+      } catch { /* never let a push failure touch fulfilment */ }
     }
 
     // Best-effort delivery — never fail fulfillment on a mail error (committed).
