@@ -143,6 +143,34 @@ describe('§2.4 wiring probe', () => {
     expect(app.get(OrderService, { strict: false }).activations).toBeDefined();
   });
 
+  it('EVERY @Optional() injection in the app actually resolves', async () => {
+    // A systematic sweep, not a spot check. An @Optional() dependency that
+    // resolves to `undefined` is silent by construction: the feature simply
+    // never runs and every test still passes. That exact failure has now bitten
+    // three times in this codebase (anti-sharing detector, admin seat service,
+    // billing activation), so each one gets an explicit assertion.
+    const { DeliverySessionService } = await import('../src/delivery/session.service');
+    const { DeliverySessionController } = await import('../src/delivery/session.controller');
+    const { LicenseAdminController } = await import('../src/admin/admin.controller');
+    const { OrderService } = await import('../src/billing/order.service');
+    const { HealthController } = await import('../src/health/health.controller');
+
+    const expectWired = (instance: any, prop: string, where: string) => {
+      expect(instance, `${where} itself missing`).toBeDefined();
+      expect(instance[prop], `${where}.${prop} resolved to undefined`).toBeDefined();
+    };
+
+    const g = (t: any) => app.get(t, { strict: false });
+    expectWired(g(DeliverySessionService), 'installs', 'DeliverySessionService');
+    expectWired(g(DeliverySessionController), 'refreshLog', 'DeliverySessionController');
+    expectWired(g(DeliverySessionController), 'sharing', 'DeliverySessionController');
+    expectWired(g(DeliverySessionController), 'activations', 'DeliverySessionController');
+    expectWired(g(LicenseAdminController), 'installsSvc', 'LicenseAdminController');
+    expectWired(g(OrderService), 'activations', 'OrderService');
+    expectWired(g(HealthController), 'dataSource', 'HealthController');
+    expectWired(g(HealthController), 'versions', 'HealthController');
+  });
+
   it('fails OPEN: a broken repository must never downgrade a paying customer', async () => {
     const { LicenseInstallService } = await import('../src/delivery/license-install.service');
     const broken = new LicenseInstallService({
