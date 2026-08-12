@@ -8,3 +8,8 @@ dist
 # Committing them would put the engine in git history for no benefit — and the
 # whole point of runtime delivery is that engine bytes are served, not shipped.
 storage/
+
+# Production secrets generated for deploy — NEVER commit.
+# Holds the licence SIGNING KEY: anyone with it can mint valid licences.
+.env.production.local
+.env.*.local
