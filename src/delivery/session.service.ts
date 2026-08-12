@@ -168,6 +168,16 @@ export class DeliverySessionService {
         channel: (licence?.channel as EngineChannel) || 'stable',
         packageFeatures: resolved.features,
         plan: resolved.plan,
+        /**
+         * §2.7 — the stable identity used to bucket this caller into a gradual
+         * release. Licence id where one exists (survives cleared storage and is
+         * shared across that customer's browsers), otherwise the install id.
+         *
+         * Both are stable per caller, which is the whole requirement: bucketing
+         * must give the SAME answer on every page load, or an editor would flip
+         * between versions and re-download a different bundle each time.
+         */
+        canaryIdentity: licence?.licId || req.installId || null,
       },
       defaults,
     );

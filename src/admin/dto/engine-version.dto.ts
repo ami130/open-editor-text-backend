@@ -8,7 +8,7 @@
  * registry can disagree with the actual bytes.
  */
 import {
-  IsArray, IsIn, IsInt, IsOptional, IsString, Matches, MaxLength, Min, ArrayNotEmpty,
+  IsArray, IsIn, IsInt, IsOptional, IsString, Matches, MaxLength, Min, Max, ArrayNotEmpty,
 } from 'class-validator';
 
 export class PublishEngineBuildDto {
@@ -135,4 +135,36 @@ export class RollbackDto {
    *  must never be blocked by a validation error on a description. */
   @IsOptional() @IsString() @MaxLength(500)
   reason?: string;
+}
+
+
+/** §2.7 — start or ramp a gradual release. */
+export class StartCanaryDto {
+  @IsString()
+  @Matches(/^(global|channel:(internal|beta|stable))$/, {
+    message: 'scope must be "global" or "channel:internal|beta|stable"',
+  })
+  scope!: string;
+
+  @IsString() @MaxLength(32)
+  version!: string;
+
+  /**
+   * 0-100. Also clamped server-side: a typo of 1000 in an admin form must never
+   * become a full rollout to every customer at once.
+   */
+  @IsInt() @Min(0) @Max(100)
+  percent!: number;
+
+  @IsOptional() @IsString() @MaxLength(500)
+  reason?: string;
+}
+
+/** §2.7 — halt a gradual release. */
+export class HaltCanaryDto {
+  @IsString()
+  @Matches(/^(global|channel:(internal|beta|stable))$/, {
+    message: 'scope must be "global" or "channel:internal|beta|stable"',
+  })
+  scope!: string;
 }

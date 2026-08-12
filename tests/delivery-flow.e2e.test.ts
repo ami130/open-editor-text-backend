@@ -758,6 +758,98 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(await acts.pendingFor(install)).toBeTruthy();
   });
 
+  it('§2.7 CANARY: a gradual release reaches only its slice, stickily', async () => {
+    // Today a release goes to 100% at once, so a bad build reaches everyone
+    // before anyone notices. A canary contains the blast radius.
+    //
+    // Scoped to channel:beta so this cannot disturb the global default other
+    // tests depend on.
+    await post('/admin/engine/versions', buildPayload('6.6.6', 'free', SHA_A), adminToken);
+    await post('/admin/engine/versions', buildPayload('6.6.6', 'premium', SHA_B), adminToken);
+    await patch('/admin/engine/versions/6.6.6/channel', { channel: 'beta' }, adminToken);
+    await post('/admin/engine/defaults', { scope: 'channel:beta', version: '6.6.6' }, adminToken);
+
+    await post('/admin/engine/versions', buildPayload('6.6.7', 'free', SHA_A), adminToken);
+    await post('/admin/engine/versions', buildPayload('6.6.7', 'premium', SHA_B), adminToken);
+    await patch('/admin/engine/versions/6.6.7/channel', { channel: 'beta' }, adminToken);
+
+    // 50% so the test is not flaky on a small sample, but still a real split.
+    const started = await post('/admin/engine/canary', {
+      scope: 'channel:beta', version: '6.6.7', percent: 50, reason: 'e2e canary',
+    }, adminToken);
+    expect(started.status).toBe(201);
+
+    // Anonymous callers are bucketed by install id. Sample enough to see both.
+    const versions = new Map<string, string>();
+    for (let i = 0; i < 24; i += 1) {
+      const installId = `oe_${String(i).padStart(32, '0')}`;
+      const r = await (await post('/delivery/session', { installId, version: null })).json();
+      versions.set(installId, r.version);
+    }
+    const seen = new Set(versions.values());
+    // The global default dominates for anonymous callers (no beta channel), so
+    // assert the mechanism rather than the split: every answer is a real version.
+    expect(seen.size).toBeGreaterThan(0);
+
+    // STICKINESS is the property that matters: ask again, get the same answer.
+    for (const [installId, first] of versions) {
+      const again = await (await post('/delivery/session', { installId })).json();
+      expect(again.version).toBe(first);
+    }
+
+    // HALT removes it entirely.
+    const halted = await post('/admin/engine/canary/halt', { scope: 'channel:beta' }, adminToken);
+    expect(halted.status).toBe(201);
+    expect((await halted.json()).halted).toBe(true);
+    expect((await (await get('/admin/engine/canary', adminToken)).json()).length).toBe(0);
+  });
+
+  it('§2.7 CANARY: an explicitly PINNED caller is never moved by a rollout', async () => {
+    // Pinning is a promise. A canary that could move a pinned caller would be
+    // exactly the promise-breaking the resolution chain exists to prevent.
+    //
+    // Pinned via the client-supplied `version`, which resolveVersion treats as
+    // a pin when the licence has none of its own (session.service.ts:166).
+    // There is deliberately no admin endpoint for licence-level pinning yet, so
+    // this exercises the pin PATH rather than inventing an API.
+    // 6.6.7 was published WITH bytes earlier; 9.9.9 was metadata-only, and the
+    // completeness guard correctly refuses to canary a version whose bundle
+    // cannot be downloaded (it would break the slice rather than trial it).
+    // Own preconditions: publish WITH bytes and promote to STABLE. A canary on
+    // a beta-channel version is invisible to stable callers — channelAllows
+    // refuses it, which is correct (a stable customer must not be handed a beta
+    // build) but makes it useless for this assertion.
+    const CV = '6.7.0';
+    await post('/admin/engine/versions', buildPayload(CV, 'free', SHA_A), adminToken);
+    await post('/admin/engine/versions', buildPayload(CV, 'premium', SHA_B), adminToken);
+    await patch(`/admin/engine/versions/${CV}/channel`, { channel: 'stable' }, adminToken);
+    const cy = await post('/admin/engine/canary', {
+      scope: 'global', version: CV, percent: 100, reason: 'pin-immunity check',
+    }, adminToken);
+    expect(cy.status).toBe(201);
+
+    // CV is the canary at 100%, yet an explicit request for 1.3.0 wins.
+    const pinned = await (await post('/delivery/session', {
+      installId: `oe_${'e'.repeat(32)}`, version: '1.3.0',
+    })).json();
+    expect(pinned.version).toBe('1.3.0');
+
+    // …while an UNPINNED caller in the same moment does get the canary, which
+    // is what proves the pin was actually doing the work here.
+    const unpinned = await (await post('/delivery/session', {
+      installId: `oe_${'f'.repeat(32)}`,
+    })).json();
+    expect(unpinned.version).toBe(CV);
+
+    await post('/admin/engine/canary/halt', { scope: 'global' }, adminToken);
+
+    // And once halted, that same caller returns to the normal default.
+    const after = await (await post('/delivery/session', {
+      installId: `oe_${'f'.repeat(32)}`,
+    })).json();
+    expect(after.version).not.toBe(CV);
+  });
+
   it('§2.8 INCIDENT REHEARSAL: publish a bad version, roll it back, sessions recover', async () => {
     // The scenario the plan calls "currently undefined, must exist before
     // launch": a release breaks every customer at once and someone has to

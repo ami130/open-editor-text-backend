@@ -22,7 +22,7 @@ import { EngineVersionService } from '../licensing/engine-version.service';
 import { EngineChannel } from '../licensing/entities/engine-version.entity';
 import {
   PublishEngineBuildDto, PromoteVersionDto, SetDefaultDto, RetireVersionDto,
-  RestoreBundleDto, RollbackDto,
+  RestoreBundleDto, RollbackDto, StartCanaryDto, HaltCanaryDto,
 } from './dto/engine-version.dto';
 
 @Controller('admin/engine')
@@ -168,6 +168,48 @@ export class EngineAdminController {
     );
     return result;
   }
+
+  /**
+   * §2.7 — START or RAMP a gradual release.
+   *
+   * The same endpoint does both: ramping is just the same call with a higher
+   * percentage. Bucketing is sticky and monotonic, so raising the percentage
+   * only ADDS callers — nobody already on the canary is moved back.
+   */
+  @Post('canary')
+  @RequirePermissions('engine.default')
+  async startCanary(@Body() dto: StartCanaryDto, @CurrentUser() user: AccessClaims) {
+    const row = await this.engine.startCanary(dto.scope, dto.version, dto.percent, {
+      actor: user?.sub ?? '',
+      reason: dto.reason ?? '',
+    });
+    this.log.warn(
+      `CANARY: ${row.scope} → ${row.version} at ${row.percent}% by ${user?.sub ?? 'unknown'}`,
+    );
+    return row;
+  }
+
+  /**
+   * §2.7 — HALT a gradual release immediately.
+   *
+   * Deletes rather than pauses: during an incident the safest state is one the
+   * resolution chain does not consider at all. Every affected session returns
+   * to the normal default on its next load.
+   */
+  @Post('canary/halt')
+  @RequirePermissions('engine.default')
+  async haltCanary(@Body() dto: HaltCanaryDto, @CurrentUser() user: AccessClaims) {
+    const result = await this.engine.haltCanary(dto.scope);
+    this.log.warn(
+      `CANARY HALTED: ${result.scope} (was ${result.version ?? 'none'}) by ${user?.sub ?? 'unknown'}`,
+    );
+    return result;
+  }
+
+  /** §2.7 — current gradual releases. */
+  @Get('canary')
+  @RequirePermissions('engine.read')
+  listCanaries() { return this.engine.listCanaries(); }
 
   /** §2.8 — what changed, when, and by whom. The rollback target comes from here. */
   @Get('defaults/history')

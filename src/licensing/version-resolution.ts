@@ -34,9 +34,14 @@ export interface VersionResolutionInput {
   channelDefault?: string | null;
   /** Global fallback default. */
   globalDefault?: string | null;
+  /**
+   * §2.7 — the version this caller receives IF they fall in the canary group.
+   * Already bucketed by the caller (see canary.ts); null when not selected.
+   */
+  canaryVersion?: string | null;
 }
 
-export type VersionSource = 'pin' | 'override' | 'channel' | 'global';
+export type VersionSource = 'pin' | 'override' | 'canary' | 'channel' | 'global';
 
 export interface VersionResolution {
   version: string | null;
@@ -49,17 +54,25 @@ export interface VersionResolution {
  *
  *   1. Customer pinned a version   → use it        (absolute)
  *   2. Admin override for them     → use it
- *   3. Their channel's default     → use it
- *   4. Global default              → fallback
+ *   3. Canary, if they are in it   → use it        (§2.7)
+ *   4. Their channel's default     → use it
+ *   5. Global default              → fallback
  *
  * PINNING IS A PROMISE. A pinned customer is unaffected by a new default, a
  * channel promotion, a canary rollout, OR a rollback. Breaking a pin even once
  * destroys the credibility of pinning permanently — which is why the pin is
  * checked before the admin override, not after.
+ *
+ * WHY THE CANARY SITS BELOW PIN AND OVERRIDE BUT ABOVE THE DEFAULTS: a gradual
+ * release is a change to *the default everyone would otherwise get*, so it must
+ * outrank those defaults — and must never outrank an explicit per-customer
+ * decision. A canary that could move a pinned customer would be the exact
+ * promise-breaking this chain exists to prevent.
  */
 export function resolveVersion(input: VersionResolutionInput): VersionResolution {
   if (input.pinnedVersion) return { version: input.pinnedVersion, source: 'pin' };
   if (input.overrideVersion) return { version: input.overrideVersion, source: 'override' };
+  if (input.canaryVersion) return { version: input.canaryVersion, source: 'canary' };
   if (input.channelDefault) return { version: input.channelDefault, source: 'channel' };
   if (input.globalDefault) return { version: input.globalDefault, source: 'global' };
   return { version: null, source: 'none' };

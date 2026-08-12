@@ -28,6 +28,8 @@ import {
   EngineDefaultEntity, GLOBAL_SCOPE, channelScope,
 } from './entities/engine-default.entity';
 import { EngineDefaultHistoryEntity } from './entities/engine-default-history.entity';
+import { EngineCanaryEntity } from './entities/engine-canary.entity';
+import { inCanary } from './canary';
 import {
   resolveVersion, resolveFeatures, missingFromBuild, channelAllows,
   eligibleAsDefault,
@@ -64,6 +66,13 @@ export interface ResolveForLicenceInput {
   packageFeatures: readonly string[];
   /** Which bundle they should receive: 'free' | 'premium'. */
   plan: string;
+  /**
+   * §2.7 — the STABLE identity used to bucket this caller into (or out of) a
+   * gradual release. A licence id where one exists, otherwise an install id.
+   * Absent/empty → never in the canary, because they could not be kept there
+   * consistently across page loads.
+   */
+  canaryIdentity?: string | null;
 }
 
 export interface ResolvedDelivery {
@@ -111,6 +120,9 @@ export class EngineVersionService {
      */
     @Optional() @InjectRepository(EngineDefaultHistoryEntity)
     private readonly history?: Repository<EngineDefaultHistoryEntity>,
+    /** §2.7 gradual release. Also LAST — see the note above. */
+    @Optional() @InjectRepository(EngineCanaryEntity)
+    private readonly canaries?: Repository<EngineCanaryEntity>,
   ) {}
 
   // ── Default pointers (steps 3 and 4 of the resolution chain) ──────────────
@@ -224,6 +236,92 @@ export class EngineVersionService {
     }
     await this.setDefault(scope, target, { ...audit, kind: 'rollback' });
     return { scope, from: current?.version || '', to: target };
+  }
+
+  // ── §2.7 gradual release (canary) ─────────────────────────────────────────
+
+  /**
+   * The canary version for this caller, or null.
+   *
+   * Checks the caller's CHANNEL scope first, then global — the same precedence
+   * the defaults use, so a channel-scoped trial is not silently overridden by a
+   * global one.
+   *
+   * Never throws: a canary is an optional refinement on top of a working
+   * resolution chain, so any failure must degrade to "no canary" rather than
+   * failing the session.
+   */
+  private async canaryFor(
+    channel: EngineChannel,
+    identity: string | null | undefined,
+  ): Promise<string | null> {
+    if (!this.canaries || !identity) return null;
+    try {
+      const rows = await this.canaries.find({
+        where: [{ scope: `channel:${channel}` }, { scope: 'global' }],
+      });
+      if (!rows.length) return null;
+      // Channel scope wins over global, matching default resolution.
+      const row = rows.find((r) => r.scope === `channel:${channel}`) || rows[0];
+      if (!row?.version || row.percent <= 0) return null;
+      return inCanary(identity, row.version, row.percent) ? row.version : null;
+    } catch (err) {
+      this.log.warn(`canary lookup failed; serving the normal default: ${String(err)}`);
+      return null;
+    }
+  }
+
+  /**
+   * Start or update a gradual release.
+   *
+   * Refuses an incomplete version for exactly the reason setDefault does:
+   * pointing even 1% of sessions at a version whose bundle cannot be fetched
+   * breaks those customers rather than trialling anything.
+   */
+  async startCanary(
+    scope: string,
+    version: string,
+    percent: number,
+    audit: { actor?: string; reason?: string } = {},
+  ): Promise<EngineCanaryEntity> {
+    if (!this.canaries) {
+      throw new BadRequestException('canary storage is not configured');
+    }
+    const { complete, missingPlans } = await this.isComplete(version);
+    if (!complete) {
+      throw new BadRequestException(
+        `Cannot canary ${version}: no downloadable bundle for ${missingPlans.join(', ')}.`,
+      );
+    }
+    const pct = Math.max(0, Math.min(100, Math.floor(Number(percent) || 0)));
+    const existing = await this.canaries.findOne({ where: { scope } });
+    const row = existing || this.canaries.create({ scope });
+    row.version = version;
+    row.percent = pct;
+    row.actor = (audit.actor || '').slice(0, 128);
+    row.reason = (audit.reason || '').slice(0, 500);
+    return this.canaries.save(row);
+  }
+
+  /**
+   * Stop a gradual release immediately.
+   *
+   * DELETES the row rather than zeroing it: during an incident the safest state
+   * is one the resolution chain does not consider at all. A paused-but-present
+   * canary invites "why is 5% still on the bad version?" at the worst moment.
+   */
+  async haltCanary(scope: string): Promise<{ scope: string; halted: boolean; version: string | null }> {
+    if (!this.canaries) return { scope, halted: false, version: null };
+    const row = await this.canaries.findOne({ where: { scope } });
+    if (!row) return { scope, halted: false, version: null };
+    await this.canaries.delete({ id: row.id });
+    return { scope, halted: true, version: row.version };
+  }
+
+  /** Current gradual releases. */
+  async listCanaries(): Promise<EngineCanaryEntity[]> {
+    if (!this.canaries) return [];
+    return this.canaries.find();
   }
 
   /** Recent pointer moves — what changed, when, by whom. */
@@ -499,9 +597,15 @@ export class EngineVersionService {
   ): Promise<ResolvedDelivery> {
     const callerChannel = (input.channel || 'stable') as EngineChannel;
 
+    // §2.7 — is this caller in a gradual release? Resolved BEFORE the chain so
+    // the chain itself stays a pure function; the bucketing is sticky, so the
+    // same caller receives the same answer on every page load.
+    const canaryVersion = await this.canaryFor(callerChannel, input.canaryIdentity);
+
     const decision = resolveVersion({
       pinnedVersion: input.pinnedVersion,
       overrideVersion: input.overrideVersion,
+      canaryVersion,
       channel: callerChannel,
       channelDefault: defaults.channelDefault,
       globalDefault: defaults.globalDefault,
