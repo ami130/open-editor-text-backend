@@ -41,6 +41,7 @@ import { BundleUrlSigner } from './bundle-url-signer';
 import { hostAllowed } from '../licensing/domain-policy';
 import { LicenseInstallService } from './license-install.service';
 import { WatermarkService } from './watermark.service';
+import { DefaultPackageService } from '../licensing/default-package.service';
 
 /** Lifetimes. Session is deliberately short — see the header. */
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -131,6 +132,9 @@ export class DeliverySessionService {
     @Optional() private readonly installs?: LicenseInstallService,
     // §2.5 per-licence watermarking. @Optional: absent = unmarked bundles.
     @Optional() private readonly watermarks?: WatermarkService,
+    // Stage 2a — the admin-defined free tier. @Optional so a deployment without
+    // it falls back to the previous sentinel behaviour rather than failing.
+    @Optional() private readonly defaultPackage?: DefaultPackageService,
   ) {}
 
   /**
@@ -149,12 +153,34 @@ export class DeliverySessionService {
       // Defaults are threaded in so the PLAN is decided against the very build
       // the version chain is about to resolve — no second lookup, no drift.
       ? await this.resolveLicensed({ ...req, ...defaults })
-      // No key → the free tier. ALL_BUILD_FEATURES, not [] — see the sentinel's
-      // docstring: an empty list would intersect to nothing and hand the user a
-      // free bundle with every feature disabled.
+      /**
+       * STAGE 2a — no key → the ADMIN-DEFINED free package.
+       *
+       * This used to be the `'*'` sentinel ("everything this build supports"),
+       * which meant the free tier was decided by HOW THE BUNDLE WAS COMPILED.
+       * An admin could not change it; removing a feature from free needed a
+       * developer and a rebuild.
+       *
+       * Now it is data. `featuresForAnonymous()` is CACHE-FIRST and never
+       * touches the database on this path (R1/T17) — the anonymous route is the
+       * hottest and most exposed in the system, and it performed zero queries
+       * before this change. It must still perform zero.
+       *
+       * It also never returns nothing: a database outage keeps serving the last
+       * known good list, and a cold process with no cache falls back to a small
+       * built-in set rather than an empty one (R3).
+       *
+       * ⚠️ Only the ANONYMOUS path moved. The six REFUSAL paths
+       * (invalid-key / revoked / expired / origin-blocked / install-cap) still
+       * use the sentinel deliberately — whether a revoked licence should get the
+       * admin's free package or something narrower is a product decision, not a
+       * refactor, and is scoped as Stage 2b.
+       */
       : {
         plan: FREE_PLAN,
-        features: [ALL_BUILD_FEATURES],
+        features: this.defaultPackage
+          ? this.defaultPackage.featuresForAnonymous()
+          : [ALL_BUILD_FEATURES],
         licence: null,
         refusal: undefined as SessionRefusal | undefined,
       };

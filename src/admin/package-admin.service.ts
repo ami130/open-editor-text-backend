@@ -4,7 +4,9 @@
  * known + sellable (the DTO checks shape; this checks business rules — a client
  * can't slip in an internal/deprecated feature).
  */
-import { Injectable, Inject, BadRequestException, NotFoundException } from '@nestjs/common';
+import {
+  Injectable, Inject, BadRequestException, NotFoundException, Optional,
+} from '@nestjs/common';
 import { Repository, In } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
 import { PackageEntity } from '../licensing/entities/package.entity';
@@ -12,12 +14,17 @@ import { FeatureEntity } from '../licensing/entities/feature.entity';
 import { isSellableFeature } from '../licensing/feature-catalog';
 import { durationPolicy, asBillingInterval } from '../licensing/duration-policy';
 import { CreatePackageDto, UpdatePackageDto } from './dto/package.dto';
+import { DefaultPackageService } from '../licensing/default-package.service';
 
 @Injectable()
 export class PackageAdminService {
   constructor(
     @InjectRepository(PackageEntity) private readonly packages: Repository<PackageEntity>,
     @InjectRepository(FeatureEntity) private readonly features: Repository<FeatureEntity>,
+    // Stage 2a — R2 guardrail: refuse to delete the package unlicensed
+    // visitors resolve to.
+    @Optional() @Inject(DefaultPackageService)
+    private readonly defaultPackage?: DefaultPackageService,
   ) {}
 
   list(): Promise<PackageEntity[]> {
@@ -100,6 +107,19 @@ export class PackageAdminService {
 
   async remove(id: string): Promise<void> {
     const pkg = await this.get(id);
+    /**
+     * R2 — the package serving every UNLICENSED visitor cannot be deleted.
+     *
+     * Without this, one click removes what every anonymous editor on the
+     * internet resolves to. The database enforces it too (ON DELETE RESTRICT),
+     * but that surfaces as an opaque FK error; this explains what to do instead.
+     */
+    if (this.defaultPackage && await this.defaultPackage.isDesignated(id)) {
+      throw new BadRequestException(
+        `"${pkg.name}" is the package served to unlicensed visitors and cannot be deleted. `
+        + 'Designate a different package first, then delete this one.',
+      );
+    }
     await this.packages.remove(pkg);
   }
 

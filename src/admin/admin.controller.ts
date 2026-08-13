@@ -6,7 +6,7 @@
  */
 import {
   Controller, Get, Post, Patch, Delete, Body, Param, Query, Inject, Optional, NotFoundException,
-  BadRequestException,
+  BadRequestException, Logger,
 } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -28,6 +28,8 @@ import { EntitlementEventsService } from '../delivery/entitlement-events.service
 import { TraceBundleDto } from './dto/trace-bundle.dto';
 import { WatermarkService } from '../delivery/watermark.service';
 import { readWatermark, matchWatermark } from '../delivery/watermark';
+import { DefaultPackageService } from '../licensing/default-package.service';
+import { SetDefaultPackageDto } from './dto/default-package.dto';
 
 @Controller('admin/features')
 export class FeatureAdminController {
@@ -49,13 +51,45 @@ export class FeatureAdminController {
 
 @Controller('admin/packages')
 export class PackageAdminController {
-  constructor(@Inject(PackageAdminService) private readonly svc: PackageAdminService) {}
+  private readonly log = new Logger(PackageAdminController.name);
+
+  constructor(
+    @Inject(PackageAdminService) private readonly svc: PackageAdminService,
+    @Optional() @Inject(DefaultPackageService)
+    private readonly defaultPackage?: DefaultPackageService,
+  ) {}
 
   @Get() @RequirePermissions('package.read') list() { return this.svc.list(); }
   @Get(':id') @RequirePermissions('package.read') get(@Param('id') id: string) { return this.svc.get(id); }
   @Post() @RequirePermissions('package.create') create(@Body() dto: CreatePackageDto) { return this.svc.create(dto); }
   @Patch(':id') @RequirePermissions('package.update') update(@Param('id') id: string, @Body() dto: UpdatePackageDto) { return this.svc.update(id, dto); }
   @Delete(':id') @RequirePermissions('package.delete') async remove(@Param('id') id: string) { await this.svc.remove(id); return { ok: true }; }
+
+  /**
+   * Stage 2a — which package UNLICENSED visitors receive.
+   *
+   * This is the single most consequential setting in the admin panel: it
+   * decides what every anonymous editor on the internet can do. Reading it is
+   * package.read; CHANGING it requires package.update.
+   */
+  @Get('default/current') @RequirePermissions('package.read')
+  currentDefault() {
+    return this.defaultPackage ? this.defaultPackage.current() : null;
+  }
+
+  @Post('default') @RequirePermissions('package.update')
+  async setDefault(@Body() dto: SetDefaultPackageDto, @CurrentUser() user: AccessClaims) {
+    if (!this.defaultPackage) throw new NotFoundException('default-package storage is not configured');
+    const res = await this.defaultPackage.designate(dto.packageId, {
+      actor: user?.sub ?? '', reason: dto.reason ?? '',
+    });
+    // WARN, not LOG: this changes what every unlicensed visitor receives, so it
+    // should stand out in whatever aggregates these lines.
+    this.log?.warn?.(
+      `DEFAULT PACKAGE CHANGED -> ${res.packageId} (${res.features} features) by ${user?.sub ?? 'unknown'}`,
+    );
+    return res;
+  }
 }
 
 @Controller('admin/customers')

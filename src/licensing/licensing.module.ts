@@ -23,6 +23,9 @@ import { EngineVersionEntity } from './entities/engine-version.entity';
 import { EngineDefaultEntity } from './entities/engine-default.entity';
 import { EngineDefaultHistoryEntity } from './entities/engine-default-history.entity';
 import { EngineCanaryEntity } from './entities/engine-canary.entity';
+import { DefaultPackageEntity } from './entities/default-package.entity';
+import { DefaultPackageService } from './default-package.service';
+import { DefaultPackageSeed } from './default-package.seed';
 import {
   DELIVERY_CONFIG, DeliveryConfig, loadDeliveryConfig,
 } from '../config/delivery.config';
@@ -38,6 +41,8 @@ const ENTITIES = [
   EngineDefaultHistoryEntity,
   // §2.7 — in-progress gradual releases.
   EngineCanaryEntity,
+  // Stage 2a — which package an unlicensed visitor receives.
+  DefaultPackageEntity,
 ];
 
 // @Global so LicenseService/LicenseSignerService are visible app-wide from a
@@ -59,7 +64,8 @@ export class LicensingModule {
 
     if (dbEnabled) {
       imports.push(TypeOrmModule.forFeature(ENTITIES));
-      providers.push(LicenseService, FeatureCatalogService, EngineVersionService);
+      providers.push(LicenseService, FeatureCatalogService, EngineVersionService,
+        DefaultPackageService, DefaultPackageSeed);
       // Bundle storage (§1.4a) is provided HERE rather than in DeliveryModule
       // because EngineVersionService lives in this module and injects it. A
       // provider registered in DeliveryModule would not be visible to it.
@@ -98,6 +104,8 @@ export class LicensingModule {
         ...(dbEnabled
           ? [
             LicenseService, FeatureCatalogService, EngineVersionService,
+            // Stage 2a — the delivery session injects this for the anonymous path.
+            DefaultPackageService,
             // Exported so the engine endpoint and its URL signer can inject them.
             DELIVERY_CONFIG, BUNDLE_STORAGE,
           ]

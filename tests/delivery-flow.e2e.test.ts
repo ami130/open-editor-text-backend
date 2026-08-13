@@ -873,6 +873,54 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(sess.features).toEqual(expect.arrayContaining(['text.bold', 'text.italic']));
   });
 
+  it('STAGE 2a: an ADMIN can change what unlicensed visitors receive, with no deploy', async () => {
+    // The heart of the dynamic-package plan. Before this, an anonymous session
+    // resolved the '*' sentinel — "everything this build supports" — so the free
+    // tier was decided by how the bundle was COMPILED. Changing it needed a
+    // developer and a rebuild.
+    const before = await (await post('/delivery/session', {})).json();
+    expect(before.plan).toBe('free');
+
+    // An admin composes a deliberately small free tier.
+    const pkg = await (await post('/admin/packages', {
+      name: `Tiny Free ${Date.now()}`, priceCents: 0, billingInterval: 'once',
+      featureIds: ['text.bold'], isFree: true, domainBound: false,
+    }, adminToken)).json();
+    expect(pkg.id).toBeTruthy();
+
+    const set = await post('/admin/packages/default', {
+      packageId: pkg.id, reason: 'e2e: shrink the free tier',
+    }, adminToken);
+    expect(set.status).toBe(201);
+
+    // A NEW anonymous visitor now receives exactly that — no deploy, no rebuild.
+    const after = await (await post('/delivery/session', {})).json();
+    expect(after.plan).toBe('free');
+    // ⚠️ The excluded feature must be one the FREE BUILD ACTUALLY SUPPORTS
+    // (text.italic), or the assertion proves nothing: the '*' sentinel would
+    // also omit a feature the build never had, so the test would pass with the
+    // feature reverted. Verified by reverting: with 'insert.table' here the
+    // test still passed; with 'text.italic' it fails, which is the point.
+    expect(after.features).toContain('text.bold');
+    expect(after.features).not.toContain('text.italic');
+
+    // And the designation is readable back.
+    const cur = await (await get('/admin/packages/default/current', adminToken)).json();
+    expect(cur.packageId).toBe(pkg.id);
+  });
+
+  it('STAGE 2a R2: the designated package cannot be DELETED out from under visitors', async () => {
+    // One click would otherwise remove what every anonymous editor resolves to.
+    const cur = await (await get('/admin/packages/default/current', adminToken)).json();
+    expect(cur?.packageId).toBeTruthy();
+
+    const del = await fetch(`${base}/admin/packages/${cur.packageId}`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${adminToken}` },
+    });
+    expect(del.status).toBe(400);
+    expect((await del.json()).message).toMatch(/unlicensed visitors|cannot be deleted/i);
+  });
+
   it('§2.7 CANARY: a gradual release reaches only its slice, stickily', async () => {
     // Today a release goes to 100% at once, so a bad build reaches everyone
     // before anyone notices. A canary contains the blast radius.
