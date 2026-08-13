@@ -14,7 +14,7 @@ import type { NestExpressApplication } from '@nestjs/platform-express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { json, urlencoded } from 'express';
-import type { Request } from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import type { RawBodyRequest } from '@nestjs/common';
 import { AppModule } from './app.module';
 import { loadAiConfig } from './config/ai.config';
@@ -88,6 +88,45 @@ async function bootstrap() {
   // credentials:true so the admin panel can send the refresh cookie.
   const auth = loadAuthConfig();
   const origins = [...new Set([...cfg.corsOrigins, ...auth.adminOrigins])];
+
+  /**
+   * TWO AUDIENCES, TWO CORS POLICIES.
+   *
+   * The admin panel and the AI proxy are called from a FEW KNOWN origins with
+   * credentials, so an allowlist is exactly right there.
+   *
+   * `/delivery/*` is the opposite: it is called from EVERY CUSTOMER'S WEBSITE.
+   * Those origins are unknowable in advance and change as you gain customers,
+   * so an allowlist can never work — and until now delivery inherited the admin
+   * allowlist, which meant a customer's browser was blocked from even asking
+   * which bundle to fetch. The engine endpoint already sent
+   * `Access-Control-Allow-Origin: *` by hand; the SESSION endpoint did not, so
+   * the editor could not get far enough to use it.
+   *
+   * ⚠️ WHY `*` IS SAFE HERE, AND ONLY HERE. These routes are deliberately
+   * PUBLIC and credential-free:
+   *   • the licence key travels in the request BODY, not a cookie
+   *   • `credentials: false`, so browsers will not attach cookies at all —
+   *     which is also why `*` is permitted by the CORS spec on this branch
+   *   • entitlement is decided server-side from the key + Origin header
+   *     (domain binding, T11), not from who is allowed to call
+   *
+   * So opening this does not widen authority: an attacker gains nothing they
+   * could not already do with curl, while a legitimate customer stops being
+   * blocked for having a domain we never listed.
+   */
+  const DELIVERY_PREFIX = '/delivery';
+  app.use((req: Request, res: Response, next: NextFunction) => {
+    if (!req.path.startsWith(DELIVERY_PREFIX)) return next();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    // Cache the preflight so a busy page does not re-ask on every load.
+    res.setHeader('Access-Control-Max-Age', '86400');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    return next();
+  });
+
   app.enableCors({
     origin: origins,
     methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],

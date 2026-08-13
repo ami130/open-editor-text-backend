@@ -88,6 +88,22 @@ beforeAll(async () => {
   app.use(helmet({ contentSecurityPolicy: false }));
   app.use(cookieParser());
   app.use(json({ limit: BUNDLE_UPLOAD_LIMIT }));
+
+  /**
+   * MIRROR main.ts's delivery CORS layer. `/delivery/*` is called from EVERY
+   * customer's website, so it cannot use the admin allowlist. Without this the
+   * harness would prove nothing about the behaviour customers actually depend
+   * on — and the gap it covers (session blocked cross-origin) made the editor
+   * unusable on any real site.
+   */
+  app.use((req: any, res: any, next: any) => {
+    if (!req.path.startsWith('/delivery')) return next();
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+    return next();
+  });
   app.use(urlencoded({ extended: true, limit: BUNDLE_UPLOAD_LIMIT }));
   await app.listen(0);
   base = (await app.getUrl()).replace('[::1]', '127.0.0.1');
@@ -850,6 +866,34 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(sess.version).toBe(V);
     expect(sess.plan).toBe('premium');
     expect(sess.features).toContain('tools.speech');
+  });
+
+  it('CORS: a customer\'s website can call /delivery/session from ANY origin', async () => {
+    // The delivery endpoints are called from origins we cannot know in advance
+    // — every customer's own domain. They previously inherited the ADMIN
+    // allowlist, so a real customer's browser was blocked from even asking
+    // which bundle to fetch. The engine endpoint already sent `*`; the session
+    // endpoint did not, so the editor never got far enough to use it.
+    const res = await fetch(`${base}/delivery/session`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: 'https://a-customer-we-never-listed.com' },
+      body: JSON.stringify({}),
+    });
+    // 200, not 201: the controller sets @HttpCode(200) explicitly — opening a
+    // session is not a resource creation.
+    expect(res.status).toBe(200);
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+
+    // And the preflight a browser sends first must succeed too.
+    const pre = await fetch(`${base}/delivery/session`, {
+      method: 'OPTIONS',
+      headers: {
+        Origin: 'https://a-customer-we-never-listed.com',
+        'Access-Control-Request-Method': 'POST',
+      },
+    });
+    expect(pre.status).toBe(204);
+    expect(pre.headers.get('access-control-allow-origin')).toBe('*');
   });
 
   it('STAGE 3a: a PAID token carries the free baseline too, so it is self-sufficient', async () => {
