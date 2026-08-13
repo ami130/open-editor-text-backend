@@ -29,7 +29,10 @@
  * features away during an incident — the failure would be silent and expensive.
  * A visibly reduced editor is recoverable; revenue given away is not.
  */
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import {
+  Injectable, Logger, Optional,
+  BadRequestException, NotFoundException, ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { PackageEntity } from './entities/package.entity';
@@ -215,15 +218,21 @@ export class DefaultPackageService {
     audit: { actor?: string; reason?: string } = {},
   ): Promise<{ packageId: string; features: number }> {
     if (!this.defaults || !this.packages) {
-      throw new Error('default-package storage is not configured');
+      // ServiceUnavailable, not a bare Error: a bare Error becomes an opaque
+      // 500 "Internal server error", and the admin sees a crash where the real
+      // answer is "this deployment has no database".
+      throw new ServiceUnavailableException('default-package storage is not configured');
     }
     const pkg = await this.packages.findOne({
       where: { id: packageId }, relations: ['features'],
     });
-    if (!pkg) throw new Error(`unknown package ${packageId}`);
+    // NotFound rather than a bare Error. A 500 here told the admin nothing:
+    // caught live when POSTing an unknown id returned "Internal server error"
+    // instead of naming the problem.
+    if (!pkg) throw new NotFoundException(`unknown package ${packageId}`);
     const count = (pkg.features || []).length;
     if (!count) {
-      throw new Error(
+      throw new BadRequestException(
         `package "${pkg.name}" grants no features — designating it would leave every `
         + 'anonymous visitor with an editor that does nothing.',
       );

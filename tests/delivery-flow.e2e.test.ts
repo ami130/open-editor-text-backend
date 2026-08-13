@@ -909,6 +909,19 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(cur.packageId).toBe(pkg.id);
   });
 
+  it('STAGE 2: designating an UNKNOWN package is a 404, not an opaque 500', async () => {
+    // Caught live: the service threw a bare Error, which Nest turns into
+    // "Internal server error". An admin picking a stale id from a cached UI
+    // would see a crash instead of "unknown package" — indistinguishable from
+    // the backend being broken.
+    const r = await post('/admin/packages/default', {
+      packageId: '00000000-0000-0000-0000-000000000000',
+    }, adminToken);
+    expect(r.status).toBe(404);
+    const msg = (await r.json()).message;
+    expect(Array.isArray(msg) ? msg.join(' ') : String(msg)).toMatch(/unknown package/i);
+  });
+
   it('STAGE 2: the designated package cannot be emptied, and edits apply instantly', async () => {
     // TWO properties, and I was wrong about which layer enforces the first.
     // I believed update() could empty an already-designated package. In fact
