@@ -470,9 +470,34 @@ export class DeliverySessionService {
       }
     }
 
-    const features = licence.package?.features?.length
+    const packageFeatures = licence.package?.features?.length
       ? licence.package.features.map((f) => f.id)
       : licence.features; // legacy rows with no package relation
+
+    /**
+     * STAGE 3a — THE TOKEN MUST CARRY THE FULL EFFECTIVE GRANT.
+     *
+     * A paid token used to list ONLY what the package added — a Pro licence
+     * said `['export.pdf']` and nothing else. That worked because the ENGINE
+     * granted its own hardcoded FREE_SET unconditionally on top
+     * (feature-gate.js: "a real license lists only PREMIUM, so without this
+     * layer a paying customer would lose free features").
+     *
+     * That hardcoded layer is exactly what Stage 3 removes, so the token has to
+     * become self-sufficient FIRST. Verified live before writing this: a real
+     * production premium token listed `['export.pdf']` alone — tightening the
+     * engine on that token would have stripped 53 free features from a paying
+     * customer instantly.
+     *
+     * So the grant is now `free tier ∪ package`. This is BACKWARD COMPATIBLE by
+     * construction: today's engine grants the free set anyway, so adding it to
+     * the token changes nothing observable now, and makes the token correct for
+     * an engine that no longer does. Tokens live ≤30 days, so a fleet becomes
+     * fully self-sufficient within one refresh cycle — which is the window the
+     * engine change must wait for.
+     */
+    const baseline = this.defaultPackage ? this.defaultPackage.featuresForAnonymous() : [];
+    const features = [...new Set([...baseline, ...packageFeatures])];
 
     /**
      * STAGE 1 — the served bundle follows what the BUILD supports, not a name.
@@ -504,7 +529,20 @@ export class DeliverySessionService {
       || req.channelDefault
       || req.globalDefault;
     const plan = versionForPlan
-      ? await this.versions.planForFeatures(versionForPlan, features)
+      /**
+       * ⚠️ PACKAGE FEATURES, NOT THE UNIONED LIST.
+       *
+       * Stage 3a adds the free-tier baseline to the TOKEN. Feeding that union
+       * here would let the baseline decide the BUNDLE: a free-only package
+       * whose baseline happens to include something the free build lacks gets
+       * pushed onto the premium bundle. Caught by the Stage 1 "no over-serving"
+       * test, which went premium for a package containing only text.bold and
+       * text.italic.
+       *
+       * The bundle must follow what the customer BOUGHT. The baseline is an
+       * entitlement floor, not a purchase.
+       */
+      ? await this.versions.planForFeatures(versionForPlan, packageFeatures)
       // No resolvable version yet (nothing published). Fall back to the RICHER
       // plan: over-serving costs bandwidth, under-serving silently removes paid
       // features, and only one of those is recoverable without a support ticket.

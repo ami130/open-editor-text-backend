@@ -852,6 +852,38 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(sess.features).toContain('tools.speech');
   });
 
+  it('STAGE 3a: a PAID token carries the free baseline too, so it is self-sufficient', async () => {
+    // WHY THIS MATTERS: today the ENGINE grants its own hardcoded FREE_SET on
+    // top of whatever the token says, which is why a Pro token could list only
+    // ['export.pdf'] and still work. Stage 3 removes that hardcoded layer, so
+    // the token must become self-sufficient BEFORE the engine tightens —
+    // otherwise a paying customer instantly loses every free feature.
+    //
+    // Verified against production before writing this: a real premium token
+    // listed ['export.pdf'] alone.
+    const pkg = await (await post('/admin/packages', {
+      name: `Selfsufficient ${Date.now()}`, priceCents: 4900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'SS Co', email: `ss-${Date.now()}@example.com`,
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    const sess = await (await post('/delivery/session', { licenceKey: key })).json();
+
+    // What they bought…
+    expect(sess.features).toContain('export.pdf');
+    // …AND the free baseline, so no hardcoded engine layer is needed.
+    expect(sess.features).toContain('text.bold');
+    // Still bounded by what the BUILD supports (T14) — the token cannot
+    // over-promise just because the baseline listed something.
+    expect(sess.plan).toBe('premium');
+  });
+
   it('STAGE 1: a FREE-only package is served the free bundle (no over-serving)', async () => {
     // The other direction matters too: a package whose features are all
     // supported by the free build must NOT be handed the premium bundle. That
