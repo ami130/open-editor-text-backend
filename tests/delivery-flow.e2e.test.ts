@@ -909,6 +909,67 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(cur.packageId).toBe(pkg.id);
   });
 
+  it('STAGE 2: the designated package cannot be emptied, and edits apply instantly', async () => {
+    // TWO properties, and I was wrong about which layer enforces the first.
+    // I believed update() could empty an already-designated package. In fact
+    // UpdatePackageDto carries @ArrayNotEmpty(), so an empty featureIds is
+    // rejected at the DTO boundary — disabling my service-level guard left this
+    // test green, which is how I found out. The service guard is kept as
+    // defence in depth for direct (non-HTTP) callers, but THIS test pins the
+    // behaviour rather than the layer: emptying is refused, whoever refuses it.
+    // Remember what was designated so this test can put it back (see the
+    // restore at the end).
+    const priorDefault = (await (await get('/admin/packages/default/current', adminToken)).json())?.packageId;
+
+    // Own preconditions: designate a package here rather than depending on
+    // another test having run first (test order is not a contract).
+    const own = await (await post('/admin/packages', {
+      name: `Guarded Free ${Date.now()}`, priceCents: 0, billingInterval: 'once',
+      featureIds: ['text.bold'], isFree: true, domainBound: false,
+    }, adminToken)).json();
+    expect(own.id).toBeTruthy();
+    expect((await post('/admin/packages/default', {
+      packageId: own.id, reason: 'e2e: empty guard',
+    }, adminToken)).status).toBe(201);
+
+    const cur = await (await get('/admin/packages/default/current', adminToken)).json();
+    expect(cur?.packageId).toBe(own.id);
+
+    const emptied = await fetch(`${base}/admin/packages/${cur.packageId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ featureIds: [] }),
+    });
+    expect(emptied.status).toBe(400);
+    // `message` is a STRING for a business-rule rejection but an ARRAY for a
+    // DTO validation failure. Normalising means the assertion tests the reason,
+    // not which layer happened to reject it.
+    const msg = (await emptied.json()).message;
+    expect(Array.isArray(msg) ? msg.join(' ') : String(msg))
+      .toMatch(/at least one feature|unlicensed visitors|featureIds/i);
+
+    // …and editing it NORMALLY still works — the guard must not block the
+    // whole point of Stage 2a.
+    const ok = await fetch(`${base}/admin/packages/${cur.packageId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${adminToken}` },
+      body: JSON.stringify({ featureIds: ['text.bold', 'text.italic'] }),
+    });
+    expect(ok.status).toBe(200);
+
+    // And the edit is live IMMEDIATELY, not after the cache TTL.
+    const sess = await (await post('/delivery/session', {})).json();
+    expect(sess.features).toContain('text.italic');
+
+    // ⚠️ RESTORE. This test re-designates the default package, which is global
+    // state every later test reads. Leaving it pointed here changed the free
+    // tier out from under the 2b test and broke it — a test must not mutate
+    // shared state it does not put back.
+    expect((await post('/admin/packages/default', {
+      packageId: priorDefault, reason: 'e2e: restore after empty-guard test',
+    }, adminToken)).status).toBe(201);
+  });
+
   it('STAGE 2b: a REVOKED licence gets the admin free tier, not "everything the build supports"', async () => {
     // Before 2b the six refusal paths returned the '*' sentinel, so a revoked
     // or expired licence received a RICHER editor than the admin-defined free

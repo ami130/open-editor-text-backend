@@ -64,6 +64,28 @@ export const PREMIUM_PLAN = 'premium';
  * BUILD contains". The build itself is the entitlement boundary — premium code
  * is not in it — so there is nothing further to restrict.
  */
+/**
+ * ⚠️ RETIRED FROM THE SESSION PATH (Stage 2a/2b), kept as a LAST-RESORT fallback.
+ *
+ * This sentinel means "everything the build supports". It used to be what every
+ * anonymous visitor and every refused licence received, which made the free
+ * tier a property of how the bundle was COMPILED rather than something an admin
+ * controls. Both paths now resolve the admin-designated package instead.
+ *
+ * It survives at exactly two call sites, reachable only when
+ * DefaultPackageService is absent — i.e. a deployment without the licensing
+ * module. That is asserted NOT to happen in production by the @Optional()
+ * injection sweep in tests/install-cap-probe.test.ts, which fails loudly if the
+ * service ever resolves to undefined.
+ *
+ * It is deliberately NOT deleted: removing it would mean a module-less
+ * deployment returns an EMPTY feature list, which intersects to nothing and
+ * hands the user an editor with every feature disabled. A too-generous fallback
+ * in a configuration that should never occur beats a broken editor.
+ *
+ * `resolveFeatures` still honours it (version-resolution.ts), which is what
+ * makes it a working fallback rather than a dead constant.
+ */
 export const ALL_BUILD_FEATURES = '*';
 
 export interface SessionRequest {

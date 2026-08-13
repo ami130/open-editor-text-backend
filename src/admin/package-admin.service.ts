@@ -77,8 +77,51 @@ export class PackageAdminService {
     if (dto.active !== undefined) pkg.active = dto.active;
     if (dto.publiclyListed !== undefined) pkg.publiclyListed = dto.publiclyListed;
     if (dto.featureIds !== undefined) pkg.features = await this.resolveFeatures(dto.featureIds);
+
+    /**
+     * The designated package may be EDITED freely — that is the whole point of
+     * Stage 2a — but it may not be emptied.
+     *
+     * `designate()` already refuses a package with no features, but that guards
+     * only the moment of designation.
+     *
+     * ⚠️ HONEST NOTE ON THIS GUARD'S VALUE. I added it believing an admin could
+     * empty an already-designated package through update(). Checking properly:
+     * `UpdatePackageDto` carries `@ArrayNotEmpty()`, so an empty `featureIds`
+     * is already rejected at the DTO boundary and this branch is UNREACHABLE
+     * through the HTTP API. Disabling it left the whole suite green, which is
+     * how I found out.
+     *
+     * It is kept deliberately, as defence in depth rather than a live fix:
+     * this service is also called directly (seeds, future admin tooling, tests)
+     * where no DTO validation runs, and the failure it prevents is silent — an
+     * empty designated package does not error, it quietly drops every visitor
+     * to seven hardcoded features. A guard whose cost is one comparison and
+     * whose failure mode is invisible is worth keeping even when a second layer
+     * currently covers it.
+     */
+    if (
+      dto.featureIds !== undefined
+      && pkg.features.length === 0
+      && this.defaultPackage
+      && await this.defaultPackage.isDesignated(id)
+    ) {
+      throw new BadRequestException(
+        `"${pkg.name}" is the package served to unlicensed visitors, so it must grant `
+        + 'at least one feature. Designate a different package first, or keep one feature.',
+      );
+    }
+
     this.applyCoherence(pkg);
-    return this.packages.save(pkg);
+    const saved = await this.packages.save(pkg);
+
+    // An edit to the designated package must take effect NOW, not after the
+    // cache TTL — an admin who removes a feature and sees it still granted
+    // would reasonably conclude the change failed.
+    if (this.defaultPackage && await this.defaultPackage.isDesignated(id)) {
+      await this.defaultPackage.warm().catch(() => undefined);
+    }
+    return saved;
   }
 
   /**

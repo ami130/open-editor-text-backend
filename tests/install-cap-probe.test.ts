@@ -154,6 +154,7 @@ describe('§2.4 wiring probe', () => {
     const { LicenseAdminController } = await import('../src/admin/admin.controller');
     const { OrderService } = await import('../src/billing/order.service');
     const { HealthController } = await import('../src/health/health.controller');
+    const { PackageAdminService } = await import('../src/admin/package-admin.service');
 
     const expectWired = (instance: any, prop: string, where: string) => {
       expect(instance, `${where} itself missing`).toBeDefined();
@@ -166,6 +167,13 @@ describe('§2.4 wiring probe', () => {
     expectWired(g(DeliverySessionController), 'sharing', 'DeliverySessionController');
     expectWired(g(DeliverySessionController), 'activations', 'DeliverySessionController');
     expectWired(g(LicenseAdminController), 'installsSvc', 'LicenseAdminController');
+    // Stage 2a/2b — DefaultPackageService decides what EVERY unlicensed visitor
+    // and every REFUSED licence receives. If it resolves to undefined the code
+    // silently falls back to the '*' sentinel: no error, no log, every user
+    // quietly gets more than the admin intended. Exactly the failure this sweep
+    // exists for, and I omitted my own service from it on the first pass.
+    expectWired(g(DeliverySessionService), 'defaultPackage', 'DeliverySessionService');
+    expectWired(g(PackageAdminService), 'defaultPackage', 'PackageAdminService');
     expectWired(g(OrderService), 'activations', 'OrderService');
     expectWired(g(HealthController), 'dataSource', 'HealthController');
     expectWired(g(HealthController), 'versions', 'HealthController');
