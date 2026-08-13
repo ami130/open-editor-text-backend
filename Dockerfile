@@ -24,24 +24,31 @@ COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 
 # ─── PERSISTENT STORAGE ─────────────────────────────────────────────────────
-# Engine bundles are written to DELIVERY_BUNDLE_DIR (a mounted volume in
-# production). Platforms mount volumes owned by ROOT, while this image runs as
-# the non-root `node` user — so without this the very first write fails with
-# EACCES and every bundle publish returns a 500.
+# Engine bundles go to DELIVERY_BUNDLE_DIR, a persistent volume in production.
 #
-# Creating the directory here and chowning it means the mount point already
-# exists with the right owner when the volume is attached. Proven the hard way:
-# a 1-byte upload failed identically to a 600 KB one, which ruled out size and
-# pointed straight at permissions.
-RUN mkdir -p /data/bundles && chown -R node:node /data
-VOLUME ["/data"]
+# ⚠️ A BUILD-TIME `chown` DOES NOT WORK, and looks like it should. The platform
+# mounts the volume OVER this path at RUNTIME, replacing the directory with a
+# fresh root-owned one — so anything done here is discarded. That was tried,
+# deployed cleanly, and changed nothing: `EACCES: permission denied, mkdir
+# '/data/bundles'` persisted because the mount shadowed the fix.
+#
+# Ownership must therefore be fixed AFTER the mount exists — i.e. at container
+# start — which is what docker-entrypoint.sh does before dropping to `node`.
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 
-# Run as the built-in non-root `node` user.
-USER node
+# NOTE: deliberately NO `USER node` here. The entrypoint starts as root purely
+# to mkdir+chown the mounted volume, then drops to `node` via setpriv (which
+# execs, so no root process survives and SIGTERM still reaches node directly).
+ENTRYPOINT ["/usr/local/bin/docker-entrypoint.sh"]
 
 EXPOSE 8787
 # Container healthcheck hits the public /health readiness probe.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
   CMD node -e "fetch('http://127.0.0.1:'+(process.env.PORT||8787)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["node", "dist/main.js"]
+# Migrations run first, then the server — see migrate-then-start.ts. railway.json
+# sets the same command; keeping them identical means a `docker run` of this
+# image behaves exactly like the deployed service rather than skipping
+# migrations and failing later on a missing table.
+CMD ["node", "dist/database/migrate-then-start.js"]
