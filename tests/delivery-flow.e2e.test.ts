@@ -909,6 +909,39 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(cur.packageId).toBe(pkg.id);
   });
 
+  it('STAGE 2b: a REVOKED licence gets the admin free tier, not "everything the build supports"', async () => {
+    // Before 2b the six refusal paths returned the '*' sentinel, so a revoked
+    // or expired licence received a RICHER editor than the admin-defined free
+    // tier — the free package could be trimmed and a refused customer would
+    // still get everything. Exactly backwards.
+    //
+    // The free tier is currently the trimmed one designated by the 2a test
+    // above (text.bold only), so a refused licence must ALSO be trimmed.
+    const pkg = await (await post('/admin/packages', {
+      name: `Revoke Me ${Date.now()}`, priceCents: 4900, billingInterval: 'monthly',
+      featureIds: ['export.pdf'], domainBound: false,
+    }, adminToken)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Revoked Co', email: `revoked-${Date.now()}@example.com`,
+    }, adminToken)).json();
+    const lic = await (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, adminToken)).json();
+    const key = lic.token || lic.licenseKey || lic.key;
+
+    // Premium while valid.
+    expect((await (await post('/delivery/session', { licenceKey: key })).json()).plan).toBe('premium');
+
+    await post(`/admin/licenses/${lic.id}/revoke`, {}, adminToken);
+
+    const after = await (await post('/delivery/session', { licenceKey: key })).json();
+    expect(after.plan).toBe('free');
+    // The point: it gets the ADMIN's free tier, which excludes text.italic —
+    // the sentinel would have included it because the build supports it.
+    expect(after.features).toContain('text.bold');
+    expect(after.features).not.toContain('text.italic');
+  });
+
   it('STAGE 2a R2: the designated package cannot be DELETED out from under visitors', async () => {
     // One click would otherwise remove what every anonymous editor resolves to.
     const cur = await (await get('/admin/packages/default/current', adminToken)).json();

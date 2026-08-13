@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import {
-  DefaultPackageService, MINIMAL_FALLBACK_FEATURES, CACHE_TTL_MS,
+  DefaultPackageService, MINIMAL_FALLBACK_FEATURES, CACHE_TTL_MS, loadRevokedPolicy,
 } from '../src/licensing/default-package.service';
 
 const pkgRow = (id: string, features: string[]) => ({
@@ -35,6 +35,16 @@ function svc(opts: {
   };
   return new DefaultPackageService(defaults as never, packages as never);
 }
+
+describe('revoked policy config', () => {
+  it('defaults to the forgiving option', () => {
+    expect(loadRevokedPolicy({})).toBe('free');
+  });
+  it('opts in to strict only when explicitly set', () => {
+    expect(loadRevokedPolicy({ LICENSE_REVOKED_FALLBACK: 'minimal' })).toBe('minimal');
+    expect(loadRevokedPolicy({ LICENSE_REVOKED_FALLBACK: 'anything-else' })).toBe('free');
+  });
+});
 
 describe('anonymous feature resolution', () => {
   it('serves the designated package\'s features', async () => {
@@ -131,6 +141,49 @@ describe('anonymous feature resolution', () => {
     for (let i = 0; i < 20; i += 1) s.featuresForAnonymous();
     await new Promise((r) => setTimeout(r, 10));
     expect(loads).toBe(1);
+  });
+
+  it('STAGE 2b: a REFUSED licence gets the same editor as an anonymous visitor', async () => {
+    // Before 2b these paths returned the '*' sentinel — "everything the build
+    // supports" — so a revoked or expired licence received a RICHER editor than
+    // the admin-defined free tier. Exactly backwards.
+    const s = svc({ designated: 'p1', packages: { p1: pkgRow('p1', ['text.bold']) } });
+    await s.warm();
+    for (const reason of ['invalid-key', 'expired', 'origin-blocked', 'install-cap']) {
+      expect(s.featuresForRefusal(reason, 'free')).toEqual(['text.bold']);
+    }
+  });
+
+  it('STAGE 2b: `revoked` honours the policy, both ways', async () => {
+    const s = svc({ designated: 'p1', packages: { p1: pkgRow('p1', ['text.bold']) } });
+    await s.warm();
+    // Forgiving (default): a revocation may be a mistake.
+    expect(s.featuresForRefusal('revoked', 'free')).toEqual(['text.bold']);
+    // Strict: drops to the minimal set.
+    expect(s.featuresForRefusal('revoked', 'minimal')).toEqual([...MINIMAL_FALLBACK_FEATURES]);
+  });
+
+  it('STAGE 2b: the policy applies ONLY to revoked — honest snags are not punished', async () => {
+    const s = svc({ designated: 'p1', packages: { p1: pkgRow('p1', ['text.bold']) } });
+    await s.warm();
+    // Even under the strict policy, an expired subscription or an unregistered
+    // domain still gets the normal free tier: those are the customers most
+    // likely to pay you.
+    expect(s.featuresForRefusal('expired', 'minimal')).toEqual(['text.bold']);
+    expect(s.featuresForRefusal('origin-blocked', 'minimal')).toEqual(['text.bold']);
+    expect(s.featuresForRefusal('install-cap', 'minimal')).toEqual(['text.bold']);
+  });
+
+  it('STAGE 2b: refusal resolution makes NO database query either', async () => {
+    const s = svc({ designated: 'p1', packages: { p1: pkgRow('p1', ['text.bold']) } });
+    await s.warm();
+    let queries = 0;
+    // @ts-expect-error count calls
+    const orig = s.packages.findOne;
+    // @ts-expect-error same
+    s.packages.findOne = async (...a: unknown[]) => { queries += 1; return orig(...a); };
+    for (let i = 0; i < 30; i += 1) s.featuresForRefusal('expired');
+    expect(queries).toBe(0);
   });
 
   it('CACHE_TTL is short enough that an admin change lands quickly', () => {

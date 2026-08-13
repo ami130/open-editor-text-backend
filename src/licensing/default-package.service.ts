@@ -56,6 +56,37 @@ export const MINIMAL_FALLBACK_FEATURES = Object.freeze([
 /** How long a resolved list is trusted before a refresh is attempted. */
 export const CACHE_TTL_MS = 30_000;
 
+/**
+ * What a REVOKED licence falls back to (Stage 2b).
+ *
+ * This is a PRICING decision, not an engineering one, so it is configuration
+ * rather than a hardcoded choice — consistent with the rest of the
+ * dynamic-package work, where what a tier contains is data an admin controls.
+ *
+ *   'free'    — a revoked licence behaves like any unlicensed visitor. Forgiving;
+ *               the customer keeps a normal free editor and can come back.
+ *   'minimal' — a revoked licence drops to the small built-in set. Creates
+ *               pressure to resolve non-payment or abuse.
+ *
+ * Defaults to 'free' because revocation is sometimes a mistake (wrong licence
+ * revoked, a billing glitch), and the cost of being wrong is asymmetric: over-
+ * serving a genuinely bad actor costs a little; crippling a legitimate
+ * customer's site over an admin error costs trust.
+ *
+ * The OTHER refusals are deliberately not configurable. invalid-key is
+ * effectively an anonymous visitor; expired / origin-blocked / install-cap are
+ * honest customers hitting a snag — a lapsed subscription, an unregistered
+ * domain, one machine too many. Punishing those would be punishing the people
+ * most likely to pay you.
+ */
+export type RevokedPolicy = 'free' | 'minimal';
+
+export function loadRevokedPolicy(env: NodeJS.ProcessEnv = process.env): RevokedPolicy {
+  return String(env.LICENSE_REVOKED_FALLBACK || '').toLowerCase() === 'minimal'
+    ? 'minimal'
+    : 'free';
+}
+
 interface Cached {
   features: string[];
   packageId: string | null;
@@ -93,6 +124,21 @@ export class DefaultPackageService {
     }
     if (this.cache) return this.cache.features;
     return [...MINIMAL_FALLBACK_FEATURES];
+  }
+
+  /**
+   * What a caller whose licence was REFUSED receives.
+   *
+   * Four of the five refusals are honest users hitting a snag (lapsed
+   * subscription, unregistered domain, one machine too many, a typo'd key), so
+   * they get the same editor an anonymous visitor gets. Only `revoked` — a
+   * deliberate admin action — is policy-driven.
+   */
+  featuresForRefusal(reason: string, policy: RevokedPolicy = loadRevokedPolicy()): string[] {
+    if (reason === 'revoked' && policy === 'minimal') {
+      return [...MINIMAL_FALLBACK_FEATURES];
+    }
+    return this.featuresForAnonymous();
   }
 
   /** Force a synchronous refresh — used at boot and by tests. */

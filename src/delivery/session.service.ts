@@ -347,6 +347,36 @@ export class DeliverySessionService {
   }
 
   /**
+   * STAGE 2b — what a caller whose licence was REFUSED receives.
+   *
+   * These six paths used to return the `'*'` sentinel, i.e. "everything the
+   * build supports". So a revoked or expired licence silently received a RICHER
+   * editor than the admin-defined free tier — the free package could be
+   * trimmed, and a refused customer would still get everything. That is exactly
+   * backwards.
+   *
+   * Now they resolve the same admin-defined package an anonymous visitor gets,
+   * through the same cache (so still no query on this path).
+   *
+   * `revoked` alone is policy-driven, because it is the only refusal that is a
+   * DELIBERATE decision about the customer rather than an honest snag — a
+   * lapsed subscription, an unregistered domain, one machine too many, a typo'd
+   * key. See RevokedPolicy for why it defaults to the forgiving option.
+   */
+  private refused(reason: SessionRefusal): {
+    plan: string; features: string[]; licence: LicenseEntity | null; refusal: SessionRefusal;
+  } {
+    return {
+      plan: FREE_PLAN,
+      features: this.defaultPackage
+        ? this.defaultPackage.featuresForRefusal(reason)
+        : [ALL_BUILD_FEATURES],
+      licence: null,
+      refusal: reason,
+    };
+  }
+
+  /**
    * The stored licence token for a licence id, if the licence is still usable.
    *
    * Returns null for a missing, revoked, or expired licence so the caller
@@ -386,21 +416,21 @@ export class DeliverySessionService {
     refusal?: SessionRefusal;
   }> {
     const claims = this.signer.verifyOwnToken(req.licenceKey as string);
-    if (!claims) return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'invalid-key' };
+    if (!claims) return this.refused('invalid-key');
 
     const licence = await this.licences.findOne({
       where: { licId: claims.lic },
       relations: ['package', 'package.features', 'customer'],
     });
-    if (!licence) return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'invalid-key' };
+    if (!licence) return this.refused('invalid-key');
     if (licence.status === 'revoked') {
-      return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'revoked' };
+      return this.refused('revoked');
     }
     if (licence.isExpired()) {
-      return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'expired' };
+      return this.refused('expired');
     }
     if (!this.originAllowed(req.origin, licence.domains)) {
-      return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'origin-blocked' };
+      return this.refused('origin-blocked');
     }
 
     // §2.4 — SEAT CAP. Last of the checks, deliberately: an invalid, revoked,
@@ -414,7 +444,7 @@ export class DeliverySessionService {
     if (cap > 0 && this.installs) {
       const seat = await this.installs.check(licence.licId, req.installId ?? null, req.origin ?? null, cap);
       if (!seat.allowed) {
-        return { plan: FREE_PLAN, features: [ALL_BUILD_FEATURES], licence: null, refusal: 'install-cap' };
+        return this.refused('install-cap');
       }
     }
 
