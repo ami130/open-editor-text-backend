@@ -45,6 +45,37 @@ describe('GET /health (no DB, no AI key)', () => {
     expect(body.checks.ai.status).toBe('not-configured');
   });
 
+  it('reports WHICH mail transport is configured — the gap that cost a real diagnosis', async () => {
+    // A licence email silently did not arrive in production and there was no
+    // way to distinguish "no transport configured" (sends are dropped, returns
+    // success) from "transport configured but failing" (returns failure). The
+    // two look identical from outside and have completely different fixes.
+    const res = await fetch(`${base}/health`);
+    const body = await res.json();
+    expect(body.checks.email).toBeDefined();
+    expect(['configured', 'not-configured']).toContain(body.checks.email.status);
+    expect(['smtp', 'webhook', 'none']).toContain(body.checks.email.transport);
+  });
+
+  it('a missing mail transport does NOT make the service look degraded', async () => {
+    // Fulfilment succeeds without email and the key stays retrievable, so
+    // losing mail costs a convenience, not the product. Reporting 'degraded'
+    // would page someone for something that is not an outage.
+    const res = await fetch(`${base}/health`);
+    const body = await res.json();
+    if (body.checks.email.status === 'not-configured') {
+      expect(body.status).not.toBe('degraded');
+    }
+  });
+
+  it('health never leaks the mail host or credentials', async () => {
+    // This endpoint is public-ish; it must not become a way to probe someone's
+    // mail setup.
+    const res = await fetch(`${base}/health`);
+    const raw = JSON.stringify(await res.json());
+    expect(raw).not.toMatch(/smtp\.|@|password|pass"|user"/i);
+  });
+
   it('the AI proxy still exists even with no DB (subsystems are decoupled)', async () => {
     // /api/ai/health is the proxy's own probe; it must respond regardless of DB.
     const r = await fetch(`${base}/api/ai/health`);

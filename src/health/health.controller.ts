@@ -7,6 +7,7 @@ import { Controller, Get, Optional, Inject } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { loadDatabaseConfig } from '../config/database.config';
 import { loadAiConfig } from '../config/ai.config';
+import { loadBillingConfig } from '../config/billing.config';
 import { loadDeliveryConfig } from '../config/delivery.config';
 import { EngineVersionService } from '../licensing/engine-version.service';
 import { Public } from '../auth/decorators';
@@ -28,16 +29,44 @@ export class HealthController {
     const db = await this.checkDb();
     const ai = loadAiConfig();
     const delivery = await this.checkDelivery();
+    const email = this.checkEmail();
     return {
+      // Email is NOT part of the degraded decision: a mail outage must never
+      // make the service look down. Fulfilment succeeds without it and the key
+      // stays retrievable — losing email costs a convenience, not the product.
       status: db.status === 'down' || delivery.status === 'down' ? 'degraded' : 'ok',
       service: 'open-editor-backend',
       checks: {
         database: db,
         ai: { status: ai.enabled ? 'configured' : 'not-configured' },
         delivery,
+        email,
       },
       timestamp: nowIso(),
     };
+  }
+
+  /**
+   * WHICH mail transport is configured — never whether one WORKS.
+   *
+   * Added after a real diagnosis cost far longer than it should have: a
+   * licence email silently did not arrive, and there was no way to tell
+   * "no transport configured" from "transport configured but failing".
+   * Both looked identical from outside, and the two have completely
+   * different fixes.
+   *
+   * Deliberately reports CONFIGURATION only — no send attempt, no
+   * credentials, not even the host. A health endpoint is public-ish and
+   * must not become a way to probe someone's mail setup, and it must not
+   * fire an email every time a monitor polls it.
+   */
+  private checkEmail(): { status: string; transport: string } {
+    const cfg = loadBillingConfig();
+    if (cfg.smtp.host) return { status: 'configured', transport: 'smtp' };
+    if (cfg.emailWebhookUrl) return { status: 'configured', transport: 'webhook' };
+    // No transport: sends are logged and dropped. Licences are still minted,
+    // so this is 'not-configured', not 'down'.
+    return { status: 'not-configured', transport: 'none' };
   }
 
   /**
