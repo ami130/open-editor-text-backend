@@ -19,7 +19,8 @@
     "test:mysql:migrations": "bash scripts/test-mysql-migrations.sh",
     "sync:features": "node scripts/sync-feature-catalog.mjs",
     "sync:features:check": "node scripts/sync-feature-catalog.mjs --check",
-    "publish:local": "node scripts/publish-local-bundles.mjs"
+    "publish:local": "node scripts/publish-local-bundles.mjs",
+    "seed:storefront": "node scripts/seed-local-storefront.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1108.0",
