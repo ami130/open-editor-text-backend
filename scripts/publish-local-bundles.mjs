@@ -66,6 +66,66 @@ if (!login.ok) {
 }
 const { accessToken } = await login.json();
 
+// ── 1b. THE KEYRING MUST MATCH THIS BACKEND ─────────────────────────────────
+//
+// Licences are verified OFFLINE against a public key compiled into the bundle.
+// So a bundle built with one environment's keyring cannot verify licences
+// issued by another — and the failure is SILENT: the session resolves, the
+// bytes download, the digest matches, and every paying customer quietly drops
+// to the free tier. That exact shape already reached production once (an EMPTY
+// keyring), and it was found by a person clicking, not by any check.
+//
+// Publishing a staging-keyring bundle to production would do the same thing to
+// everyone at once. `verify-bundles.mjs` checks a keyring is PRESENT; nothing
+// checked it was the RIGHT one. This does.
+//
+// Read the kid out of the built bundle and compare it with the JWKS the target
+// backend actually publishes. Mismatch = refuse, before a single byte is sent.
+{
+  const freeSrc = readFileSync(join(DELIVERY, 'free.js'), 'utf-8');
+  const m = freeSrc.match(/licenseKeys:\[\{kid:"([^"]+)"/);
+  const bundleKid = m ? m[1] : null;
+
+  let backendKids = [];
+  try {
+    const res = await fetch(`${API}/.well-known/jwks.json`);
+    if (res.ok) {
+      const jwks = await res.json();
+      backendKids = (jwks.keys || []).map((k) => k.kid).filter(Boolean);
+    }
+  } catch { /* handled below */ }
+
+  if (!bundleKid) {
+    // A keyless bundle verifies NOTHING. Never publish one.
+    die('The built bundle carries NO licence keyring, so every licence would\n'
+      + '  fail and every paying customer would silently drop to free.\n\n'
+      + '  Rebuild with the target backend\'s keys:\n'
+      + `    DELIVERY_RELEASE=1 DELIVERY_LICENSE_KEYS="$(curl -s ${API}/.well-known/jwks.json)" \\\n`
+      + '      npm run build:delivery');
+  }
+
+  if (!backendKids.length) {
+    die(`Could not read ${API}/.well-known/jwks.json, so the bundle's keyring\n`
+      + `  ("${bundleKid}") cannot be checked against this backend.\n\n`
+      + '  Refusing to publish blind: a mismatched keyring breaks every paying\n'
+      + '  customer at once, silently. Fix the endpoint and retry.');
+  }
+
+  if (!backendKids.includes(bundleKid)) {
+    die(`KEYRING MISMATCH — refusing to publish.\n\n`
+      + `    bundle was built with : ${bundleKid}\n`
+      + `    ${API} publishes      : ${backendKids.join(', ')}\n\n`
+      + '  This bundle cannot verify any licence issued by that backend. Every\n'
+      + '  paying customer would silently drop to the free tier.\n\n'
+      + '  You are almost certainly publishing a bundle built for a DIFFERENT\n'
+      + '  environment. Rebuild against this one:\n'
+      + `    DELIVERY_RELEASE=1 DELIVERY_LICENSE_KEYS="$(curl -s ${API}/.well-known/jwks.json)" \\\n`
+      + '      npm run build:delivery');
+  }
+
+  console.log(`\n  keyring ✓ bundle "${bundleKid}" matches ${API}`);
+}
+
 // ── 2. Publish both plans, bytes included ───────────────────────────────────
 console.log(`\n  publishing engine ${version} → ${API}`);
 for (const plan of ['free', 'premium']) {
