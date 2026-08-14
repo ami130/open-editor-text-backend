@@ -141,6 +141,57 @@ if (LICENCE_KEY) {
     } else {
       fail('premium features granted', `missing: ${missing.join(', ')}`);
     }
+
+    // ── The PREMIUM BYTES themselves ────────────────────────────────────────
+    //
+    // Everything above asks the SERVER what it grants. That is not the same
+    // question as "does the bundle a paying customer downloads actually work?"
+    //
+    // This check only inspected the anonymous (free) bundle and inferred
+    // premium from the server's answer. So a premium bundle with a wrong or
+    // empty keyring — the single most expensive failure in this system —
+    // produced an ALL-GREEN report. Free and premium are separate builds; one
+    // says nothing about the other.
+    if (lic.engine?.url) {
+      try {
+        const url = lic.engine.url.startsWith('http') ? lic.engine.url : `${API}${lic.engine.url}`;
+        const res = await withTimeout(fetch(url), TIMEOUT_MS, 'premium bundle download');
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const bytes = Buffer.from(await res.arrayBuffer());
+
+        const digest = createHash('sha256').update(bytes).digest('hex');
+        if (digest === lic.engine.sha256) {
+          pass('premium bundle integrity', `${(bytes.length / 1024).toFixed(0)} KB, sha ${digest.slice(0, 12)}…`);
+        } else {
+          fail('premium bundle integrity',
+            `promised ${lic.engine.sha256?.slice(0, 12)}… got ${digest.slice(0, 12)}… — the loader will refuse to run this`);
+        }
+
+        const src = bytes.toString('utf8');
+        const kid = src.match(/licenseKeys:\[\{kid:"([^"]+)"/);
+        if (kid) {
+          pass('premium bundle keyring', `kid=${kid[1]}`);
+        } else {
+          fail('premium bundle keyring',
+            'the PREMIUM bundle has no keyring — paying customers download it and it '
+            + 'can verify nothing, so they silently get the free tier. See RUNBOOK 6b.');
+        }
+
+        // The paid features must be IN the bytes, not merely granted by the
+        // server. A premium build that somehow shipped without them would
+        // otherwise pass every check above.
+        const hasExports = /exportPdfBlocked/.test(src) && /buildDocxBytes/.test(src);
+        if (hasExports) {
+          pass('premium bundle contains export code', 'exportPdf + exportDocx present');
+        } else {
+          fail('premium bundle contains export code',
+            'the premium bundle is missing PDF/DOCX implementation — it is very '
+            + 'likely a free build published under the premium key');
+        }
+      } catch (err) {
+        fail('premium bundle download', err.message);
+      }
+    }
   } catch (err) {
     fail('licence resolves to premium', err.message);
   }

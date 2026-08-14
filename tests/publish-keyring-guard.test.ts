@@ -61,12 +61,12 @@ describe('keyring extraction', () => {
 
 describe('publish guard', () => {
   it('refuses when the bundle carries no keyring', () => {
-    expect(src).toMatch(/if \(!bundleKid\)/);
+    expect(src).toMatch(/if \(!kid\) \{/);
     expect(src).toMatch(/carries NO licence keyring/);
   });
 
   it('refuses when the bundle kid is not in the backend JWKS', () => {
-    expect(src).toMatch(/if \(!backendKids\.includes\(bundleKid\)\)/);
+    expect(src).toMatch(/if \(!backendKids\.includes\(kid\)\)/);
     expect(src).toMatch(/KEYRING MISMATCH/);
   });
 
@@ -87,18 +87,47 @@ describe('publish guard', () => {
   it('names the exact rebuild command in every keyring refusal', () => {
     // A guard that blocks without saying what to do just gets worked around.
     //
-    // Scoped to the THREE keyring refusals by their opening words. An earlier
-    // version filtered on "keyring appears in the next 400 chars", which also
-    // matched the unrelated login-failure die() that merely sits above this
-    // block — the test failed for a reason that had nothing to do with the
-    // guard.
+    // Asserts the hint is REACHED, not that its literal text sits inside each
+    // message: three of the four refusals append the shared `rebuildHint`
+    // variable. An earlier version grepped for the literal in each block and
+    // failed on messages that were perfectly correct at runtime — verified by
+    // actually running all four paths.
     const refusals = src
       .split('die(')
       .slice(1)
-      .filter((s) => /^[`'"](The built bundle carries NO|Could not read|KEYRING MISMATCH)/.test(s.trim()));
-    expect(refusals.length).toBe(3);
+      .filter((s) => /^[`'"](The \$\{plan\} bundle carries NO|Could not read|KEYRING MISMATCH|KEYRING SPLIT)/.test(s.trim()));
+    // FOUR now, not three: the rewrite made the keyless message per-plan and
+    // added KEYRING SPLIT (plans built with different keyrings).
+    expect(refusals.length).toBe(4);
     for (const r of refusals) {
-      expect(r.slice(0, 900)).toMatch(/DELIVERY_LICENSE_KEYS|jwks\.json/);
+      expect(r.slice(0, 900)).toMatch(/rebuildHint|DELIVERY_LICENSE_KEYS|jwks\.json|Fix the endpoint/);
     }
+    // …and the hint itself must actually name the build command.
+    expect(src).toMatch(/const rebuildHint =[\s\S]{0,200}DELIVERY_LICENSE_KEYS/);
+  });
+});
+
+describe('guard covers EVERY plan, not just free', () => {
+  it('iterates the shared PLANS list rather than reading free.js alone', () => {
+    // THE BUG: the first version read only free.js and then published both
+    // plans. Proven exploitable — a premium bundle with a wrong kid printed
+    // "keyring ✓" and proceeded. Premium is the PAID path, so that was the
+    // most expensive possible version of this mistake.
+    expect(src).toMatch(/for \(const plan of PLANS\)/);
+    expect(src).not.toMatch(/readFileSync\(join\(DELIVERY, 'free\.js'\)/);
+  });
+
+  it('defines PLANS once, so the guard and the publish loop cannot drift', () => {
+    // They HAD drifted: the guard hardcoded free, the loop hardcoded
+    // ['free','premium']. Two lists that must agree eventually disagree.
+    expect(src).toMatch(/const PLANS = \['free', 'premium'\]/);
+    expect(src.match(/for \(const plan of PLANS\)/g)?.length).toBe(2);
+    expect(src).not.toMatch(/for \(const plan of \['free', 'premium'\]\)/);
+  });
+
+  it('refuses when the plans carry DIFFERENT keyrings', () => {
+    // Both kids can be individually valid during a key rotation, yet a
+    // mismatched pair still means they came from different builds.
+    expect(src).toMatch(/KEYRING SPLIT/);
   });
 });

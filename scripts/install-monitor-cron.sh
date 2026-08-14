@@ -43,7 +43,11 @@ fi
 NODE_DIR="$(dirname "$NPM_BIN")"
 
 # The key file has a header; the token is the last non-empty line.
-CMD="cd '$HERE' && PATH=\"$NODE_DIR:\$PATH\" LICENCE_KEY=\$(tail -n 2 '$KEY_FILE' | tr -d '[:space:]') ORIGIN='$ORIGIN' '$NPM_BIN' run --silent check:delivery >> '$LOG' 2>&1"
+# Runs through monitor-run.sh, NOT check:delivery directly. The raw check only
+# appends to a log — detection with no notification, which is not monitoring.
+# The wrapper raises a macOS notification (and an optional webhook) on failure,
+# and rotates the log so an unattended monitor cannot fill the disk.
+CMD="cd '$HERE' && PATH=\"$NODE_DIR:\$PATH\" LICENCE_KEY=\$(tail -n 2 '$KEY_FILE' | tr -d '[:space:]') ORIGIN='$ORIGIN' LOG='$LOG' ${ALERT_WEBHOOK:+ALERT_WEBHOOK='$ALERT_WEBHOOK' }/bin/bash '$HERE/scripts/monitor-run.sh'"
 LINE="*/15 * * * * $CMD $MARKER"
 
 case "${1:-}" in
@@ -84,8 +88,12 @@ fi
 # inherited PATH. This is what caught npm-under-nvm being invisible to cron; a
 # check that only runs in your interactive shell proves nothing about cron.
 echo "  verifying the command works in a bare (cron-like) environment…"
+# NOTE: $CMD is run whole. It used to be truncated at `>>` to drop a log
+# redirect that no longer exists (monitor-run.sh owns the log now); leaving that
+# truncation in would have silently tested a DIFFERENT command than the one
+# scheduled — the precise class of mistake this check exists to catch.
 if ! env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-     sh -c "${CMD%% >>*}" >/dev/null 2>&1; then
+     sh -c "$CMD" >/dev/null 2>&1; then
   echo
   echo "  ✗ The command FAILED with cron's minimal environment, even though it"
   echo "    works in your shell. Almost always PATH: cron cannot see a"

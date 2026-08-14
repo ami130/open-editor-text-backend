@@ -30,6 +30,17 @@ const PASSWORD = process.env.ADMIN_PASSWORD || 'local-dev-password';
 const DELIVERY = join(CORE, 'dist', 'delivery');
 const MANIFEST = join(DELIVERY, 'manifest.json');
 
+/**
+ * The plans published, in one place.
+ *
+ * Defined once ON PURPOSE: the keyring guard and the publish loop MUST cover
+ * exactly the same set. They did not — the guard inspected only free.js while
+ * the loop published free AND premium from its own hardcoded list, so a premium
+ * bundle with the wrong keyring sailed through. Two lists that must agree will
+ * eventually disagree.
+ */
+const PLANS = ['free', 'premium'];
+
 const die = (msg) => { console.error(`\n✗ ${msg}\n`); process.exit(1); };
 
 if (!existsSync(MANIFEST)) {
@@ -81,11 +92,18 @@ const { accessToken } = await login.json();
 //
 // Read the kid out of the built bundle and compare it with the JWKS the target
 // backend actually publishes. Mismatch = refuse, before a single byte is sent.
+// ⚠️ EVERY PLAN IS CHECKED, NOT JUST free.js.
+//
+// The first version of this guard read only free.js and then published BOTH
+// plans. Proven exploitable: setting premium's kid to a wrong value while
+// leaving free correct printed "keyring ✓" and proceeded. Only bundle
+// immutability stopped the upload — on a new version it would have shipped a
+// premium bundle that verifies nothing.
+//
+// That is the worst possible version of this bug, because PREMIUM IS THE PAID
+// PATH. Checking free and inferring premium is the same reasoning that let the
+// empty-keyring incident reach production.
 {
-  const freeSrc = readFileSync(join(DELIVERY, 'free.js'), 'utf-8');
-  const m = freeSrc.match(/licenseKeys:\[\{kid:"([^"]+)"/);
-  const bundleKid = m ? m[1] : null;
-
   let backendKids = [];
   try {
     const res = await fetch(`${API}/.well-known/jwks.json`);
@@ -95,40 +113,62 @@ const { accessToken } = await login.json();
     }
   } catch { /* handled below */ }
 
-  if (!bundleKid) {
-    // A keyless bundle verifies NOTHING. Never publish one.
-    die('The built bundle carries NO licence keyring, so every licence would\n'
-      + '  fail and every paying customer would silently drop to free.\n\n'
-      + '  Rebuild with the target backend\'s keys:\n'
-      + `    DELIVERY_RELEASE=1 DELIVERY_LICENSE_KEYS="$(curl -s ${API}/.well-known/jwks.json)" \\\n`
-      + '      npm run build:delivery');
+  const rebuildHint = `    DELIVERY_RELEASE=1 DELIVERY_LICENSE_KEYS="$(curl -s ${API}/.well-known/jwks.json)" \\\n`
+    + '      npm run build:delivery';
+
+  const seen = [];
+  for (const plan of PLANS) {
+    const file = join(DELIVERY, `${plan}.js`);
+    if (!existsSync(file)) die(`missing ${file} — run build:delivery`);
+
+    const m = readFileSync(file, 'utf-8').match(/licenseKeys:\[\{kid:"([^"]+)"/);
+    const kid = m ? m[1] : null;
+
+    if (!kid) {
+      // A keyless bundle verifies NOTHING. Never publish one.
+      die(`The ${plan} bundle carries NO licence keyring, so every licence\n`
+        + '  would fail and every paying customer would silently drop to free.\n\n'
+        + '  Rebuild with the target backend\'s keys:\n' + rebuildHint);
+    }
+
+    if (!backendKids.length) {
+      die(`Could not read ${API}/.well-known/jwks.json, so the ${plan} bundle's\n`
+        + `  keyring ("${kid}") cannot be checked against this backend.\n\n`
+        + '  Refusing to publish blind: a mismatched keyring breaks every paying\n'
+        + '  customer at once, silently. Fix the endpoint and retry.');
+    }
+
+    if (!backendKids.includes(kid)) {
+      die('KEYRING MISMATCH — refusing to publish.\n\n'
+        + `    ${plan} bundle was built with : ${kid}\n`
+        + `    ${API} publishes${' '.repeat(Math.max(1, 14 - plan.length))}: ${backendKids.join(', ')}\n\n`
+        + '  This bundle cannot verify any licence issued by that backend. Every\n'
+        + '  paying customer would silently drop to the free tier.\n\n'
+        + '  You are almost certainly publishing a bundle built for a DIFFERENT\n'
+        + '  environment. Rebuild against this one:\n' + rebuildHint);
+    }
+
+    seen.push(`${plan}=${kid}`);
   }
 
-  if (!backendKids.length) {
-    die(`Could not read ${API}/.well-known/jwks.json, so the bundle's keyring\n`
-      + `  ("${bundleKid}") cannot be checked against this backend.\n\n`
-      + '  Refusing to publish blind: a mismatched keyring breaks every paying\n'
-      + '  customer at once, silently. Fix the endpoint and retry.');
+  // Free and premium disagreeing means the two were built at different times,
+  // or against different environments — publishing that pair is never correct
+  // even when both kids individually appear in the JWKS (e.g. during a key
+  // rotation, when the backend legitimately publishes two).
+  const kids = new Set(seen.map((s) => s.split('=')[1]));
+  if (kids.size > 1) {
+    die('KEYRING SPLIT — refusing to publish.\n\n'
+      + `    ${seen.join('\n    ')}\n\n`
+      + '  The plans were built with DIFFERENT keyrings, so they came from\n'
+      + '  different builds. Rebuild both together:\n' + rebuildHint);
   }
 
-  if (!backendKids.includes(bundleKid)) {
-    die(`KEYRING MISMATCH — refusing to publish.\n\n`
-      + `    bundle was built with : ${bundleKid}\n`
-      + `    ${API} publishes      : ${backendKids.join(', ')}\n\n`
-      + '  This bundle cannot verify any licence issued by that backend. Every\n'
-      + '  paying customer would silently drop to the free tier.\n\n'
-      + '  You are almost certainly publishing a bundle built for a DIFFERENT\n'
-      + '  environment. Rebuild against this one:\n'
-      + `    DELIVERY_RELEASE=1 DELIVERY_LICENSE_KEYS="$(curl -s ${API}/.well-known/jwks.json)" \\\n`
-      + '      npm run build:delivery');
-  }
-
-  console.log(`\n  keyring ✓ bundle "${bundleKid}" matches ${API}`);
+  console.log(`\n  keyring ✓ ${seen.join(', ')} — all match ${API}`);
 }
 
 // ── 2. Publish both plans, bytes included ───────────────────────────────────
 console.log(`\n  publishing engine ${version} → ${API}`);
-for (const plan of ['free', 'premium']) {
+for (const plan of PLANS) {
   const entry = manifest.plans[plan];
   const file = join(DELIVERY, `${plan}.js`);
   if (!existsSync(file)) die(`missing ${file} — run build:delivery`);
