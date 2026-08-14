@@ -192,6 +192,18 @@ export class LicenseAdminController {
     const shaped = list.map((l) => ({
       id: l.id,
       licId: l.licId,
+      /**
+       * WHICH key signed this licence (Phase 4b).
+       *
+       * A licence issued by one environment cannot verify against a bundle
+       * carrying another's keyring — it silently resolves to the free tier.
+       * That has already happened here (an `oe-dev-1` key pasted into a
+       * production demo). Surfacing the kid in the list makes a
+       * wrong-environment licence visible without decoding the token.
+       *
+       * Public key ID only; never key material.
+       */
+      kid: l.kid,
       planName: l.planName,
       planPriceCents: l.planPriceCents,
       planCurrency: l.planCurrency,
