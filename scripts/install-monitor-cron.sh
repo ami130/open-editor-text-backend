@@ -1,117 +1,162 @@
 #!/usr/bin/env bash
 #
-# install-monitor-cron.sh — run the delivery check every 15 minutes.
+# install-monitor-cron.sh — run the delivery check every 15 minutes, for real.
 #
-# WHY: check-delivery.mjs asserts the customer-visible chain and catches the
-# failures /health cannot see (empty keyring, licence not resolving to premium,
-# a bundle whose digest does not match). It has existed since the last release
-# and NOTHING HAS BEEN RUNNING IT — a monitor nobody runs is documentation.
+# ─── THE MACOS TRAP THIS EXISTS TO SURVIVE ──────────────────────────────────
+# The first version pointed cron straight at this checkout. It installed
+# cleanly, passed every pre-flight, reported "✓ installed" — and then failed
+# every 15 minutes for hours without producing a single log line:
 #
-# This installs one crontab line. It is idempotent: re-running replaces the
-# existing entry rather than adding a duplicate.
+#   tail: …/INTERNAL-DEMO-KEY.txt: Operation not permitted
+#   /bin/bash: …/scripts/monitor-run.sh: Operation not permitted
 #
-#   bash scripts/install-monitor-cron.sh                 # install
-#   bash scripts/install-monitor-cron.sh --uninstall     # remove
-#   bash scripts/install-monitor-cron.sh --dry-run       # show, change nothing
+# macOS TCC denies background schedulers access to ~/Desktop (and ~/Documents,
+# ~/Downloads) unless the scheduler itself has Full Disk Access. This project
+# lives on the Desktop. Measured, not assumed:
 #
-# The licence key is read from a file rather than baked into the crontab, so it
-# does not sit in `crontab -l` output or in process listings.
-set -euo pipefail
+#   cron           reading ~/Desktop  → Operation not permitted
+#   launchd agent  reading ~/Desktop  → Operation not permitted  (not a cron bug)
+#   cron           reading ~/.config  → READ OK                  (it is the PATH)
+#
+# The pre-flight passed because it ran as the interactive user, who does have
+# access. Verifying as yourself proves nothing about the scheduler.
+#
+# ─── THE FIX ────────────────────────────────────────────────────────────────
+# Install a SELF-CONTAINED copy outside the protected path. check-delivery.mjs
+# imports only `node:crypto`, so the runtime footprint is one .mjs file, one key
+# file and one wrapper — no node_modules, no repo access. cron then never
+# touches ~/Desktop and needs no special permission.
+#
+#   bash scripts/install-monitor-cron.sh              install
+#   bash scripts/install-monitor-cron.sh --uninstall  remove
+#   bash scripts/install-monitor-cron.sh --dry-run    show, change nothing
+set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 KEY_FILE="${KEY_FILE:-$HERE/../INTERNAL-DEMO-KEY.txt}"
-LOG="${LOG:-$HOME/Library/Logs/oe-delivery.log}"
 ORIGIN="${ORIGIN:-https://open-editor-text-web.vercel.app}"
+API_URL="${API:-https://open-editor-text-backend-production.up.railway.app}"
 MARKER="# open-editor delivery monitor"
 
-# ⚠️ RESOLVE npm TO AN ABSOLUTE PATH.
-#
-# cron does NOT load your shell profile. Under nvm (or Homebrew, or asdf) npm
-# lives somewhere like ~/.nvm/versions/node/v24.12.0/bin/npm, which is not in
-# cron's minimal PATH (/usr/bin:/bin:/usr/sbin:/sbin). A bare `npm` in the
-# crontab therefore dies with "env: npm: No such file or directory" — every 15
-# minutes, into a log nobody reads, while the monitor appears installed.
-#
-# Caught by running the entry under `env -i` before trusting it. A monitor that
-# silently never runs is worse than no monitor: it manufactures false calm.
-NPM_BIN="$(command -v npm || true)"
-if [ -z "$NPM_BIN" ]; then
-  echo "  ✗ npm not found on PATH — cannot build a cron entry."
+# Everything the scheduler touches lives here — deliberately NOT in the repo.
+RUN_DIR="${RUN_DIR:-$HOME/.config/open-editor-monitor}"
+LOG="${LOG:-$RUN_DIR/delivery.log}"
+
+NODE_BIN="$(command -v node || true)"
+if [ -z "$NODE_BIN" ]; then
+  echo "  ✗ node not found on PATH — cannot build a cron entry."
   exit 1
 fi
-# node must also be reachable, since npm shells out to it.
-NODE_DIR="$(dirname "$NPM_BIN")"
 
-# The key file has a header; the token is the last non-empty line.
-# Runs through monitor-run.sh, NOT check:delivery directly. The raw check only
-# appends to a log — detection with no notification, which is not monitoring.
-# The wrapper raises a macOS notification (and an optional webhook) on failure,
-# and rotates the log so an unattended monitor cannot fill the disk.
-CMD="cd '$HERE' && PATH=\"$NODE_DIR:\$PATH\" LICENCE_KEY=\$(tail -n 2 '$KEY_FILE' | tr -d '[:space:]') ORIGIN='$ORIGIN' LOG='$LOG' ${ALERT_WEBHOOK:+ALERT_WEBHOOK='$ALERT_WEBHOOK' }/bin/bash '$HERE/scripts/monitor-run.sh'"
-LINE="*/15 * * * * $CMD $MARKER"
+CRON_LINE="*/15 * * * * /bin/bash '$RUN_DIR/run.sh' $MARKER"
 
 case "${1:-}" in
   --uninstall)
     crontab -l 2>/dev/null | grep -v "$MARKER" | crontab - || true
-    echo "  removed the delivery monitor from crontab"
+    rm -rf "$RUN_DIR"
+    echo "  removed the delivery monitor (crontab entry and $RUN_DIR)"
     exit 0
     ;;
   --dry-run)
-    echo "  would install:"
-    echo "    $LINE"
-    echo
+    echo "  would install into: $RUN_DIR"
+    echo "  crontab line:"
+    echo "    $CRON_LINE"
     echo "  log: $LOG"
     exit 0
     ;;
 esac
 
-if [ ! -f "$KEY_FILE" ]; then
-  echo "  ✗ No licence key file at $KEY_FILE"
-  echo "    Set KEY_FILE=/path/to/key, or run without a key to monitor the"
-  echo "    anonymous chain only (premium checks are then skipped)."
-  exit 1
+[ -f "$KEY_FILE" ] || { echo "  ✗ No licence key file at $KEY_FILE"; exit 1; }
+
+mkdir -p "$RUN_DIR"
+chmod 700 "$RUN_DIR"
+
+# ── Stage a self-contained copy ─────────────────────────────────────────────
+cp "$HERE/scripts/check-delivery.mjs" "$RUN_DIR/check-delivery.mjs"
+
+# The licence key is a real credential: copied to a 0600 file rather than
+# embedded in the crontab, where `crontab -l` and `ps` would expose it.
+tail -n 2 "$KEY_FILE" | tr -d '[:space:]' > "$RUN_DIR/licence.key"
+chmod 600 "$RUN_DIR/licence.key"
+
+cat > "$RUN_DIR/run.sh" <<RUNNER
+#!/bin/bash
+# GENERATED by install-monitor-cron.sh — re-run that script to update.
+# Self-contained on purpose: touches nothing under ~/Desktop, which macOS TCC
+# hides from background schedulers.
+export PATH="$(dirname "$NODE_BIN"):\$PATH"
+export API='$API_URL'
+export ORIGIN='$ORIGIN'
+export LICENCE_KEY="\$(cat '$RUN_DIR/licence.key' 2>/dev/null)"
+LOG='$LOG'
+MAX=1048576
+STAMP="\$(date '+%Y-%m-%d %H:%M:%S')"
+
+if [ -f "\$LOG" ] && [ "\$(wc -c < "\$LOG" | tr -d ' ')" -gt "\$MAX" ]; then
+  mv -f "\$LOG" "\$LOG.1"
 fi
 
-mkdir -p "$(dirname "$LOG")"
+OUT="\$('$NODE_BIN' '$RUN_DIR/check-delivery.mjs' 2>&1)"
+CODE=\$?
 
-# Verify it actually passes BEFORE scheduling it. Installing a monitor that is
-# already failing means the first alert is about the install, not the service.
+if [ \$CODE -eq 0 ]; then
+  echo "\$STAMP  OK" >> "\$LOG"
+  exit 0
+fi
+
+{
+  echo ""
+  echo "════════════════════════════════════════════════════════════"
+  echo "\$STAMP  DELIVERY CHECK FAILED (exit \$CODE)"
+  echo "════════════════════════════════════════════════════════════"
+  echo "\$OUT"
+} >> "\$LOG"
+
+SUMMARY="\$(echo "\$OUT" | grep '✗' | head -3 | sed 's/^ *//' | tr '\n' ';' | cut -c1-200)"
+[ -z "\$SUMMARY" ] && SUMMARY="check exited \$CODE"
+
+if command -v osascript >/dev/null 2>&1; then
+  osascript -e "display notification \"\$SUMMARY\" with title \"Open Editor: delivery FAILING\" sound name \"Basso\"" >/dev/null 2>&1
+fi
+
+if [ -n "\${ALERT_WEBHOOK:-}" ]; then
+  curl -s -m 15 -X POST "\$ALERT_WEBHOOK" -H 'Content-Type: application/json' \
+    -d "{\"text\":\"Open Editor delivery FAILING — \$SUMMARY\"}" >/dev/null 2>&1
+fi
+
+exit \$CODE
+RUNNER
+chmod 700 "$RUN_DIR/run.sh"
+
+# ── Verify it passes right now ─────────────────────────────────────────────
 echo "  running the check once before scheduling…"
-if ! (cd "$HERE" && LICENCE_KEY="$(tail -n 2 "$KEY_FILE" | tr -d '[:space:]')" ORIGIN="$ORIGIN" npm run --silent check:delivery); then
+if ! /bin/bash "$RUN_DIR/run.sh"; then
   echo
-  echo "  ✗ The check FAILED right now. Not scheduling it — fix the failure first,"
-  echo "    or you will schedule an alarm that is already ringing."
+  echo "  ✗ The check FAILED. Not scheduling — see $LOG"
   exit 1
 fi
 
-# Run the ACTUAL command line in a cron-like environment — no shell profile, no
-# inherited PATH. This is what caught npm-under-nvm being invisible to cron; a
-# check that only runs in your interactive shell proves nothing about cron.
-echo "  verifying the command works in a bare (cron-like) environment…"
-# NOTE: $CMD is run whole. It used to be truncated at `>>` to drop a log
-# redirect that no longer exists (monitor-run.sh owns the log now); leaving that
-# truncation in would have silently tested a DIFFERENT command than the one
-# scheduled — the precise class of mistake this check exists to catch.
+# ── Verify it survives cron's environment ──────────────────────────────────
+# Kept because it still catches PATH mistakes. It is NOT sufficient on its own:
+# it passed while the real cron job was being denied by TCC, because it runs as
+# the interactive user. The TCC problem is solved structurally above, by not
+# touching the protected path at all.
+echo "  verifying under a cron-like environment…"
 if ! env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-     sh -c "$CMD" >/dev/null 2>&1; then
-  echo
-  echo "  ✗ The command FAILED with cron's minimal environment, even though it"
-  echo "    works in your shell. Almost always PATH: cron cannot see a"
-  echo "    version-manager npm (nvm/asdf/Homebrew)."
-  echo
-  echo "    npm resolved to: $NPM_BIN"
-  echo "    Not scheduling — a monitor that never runs is worse than none."
+     /bin/bash "$RUN_DIR/run.sh" >/dev/null 2>&1; then
+  echo "  ✗ Failed with cron's minimal environment. Not scheduling."
   exit 1
 fi
 
-( crontab -l 2>/dev/null | grep -v "$MARKER" || true; echo "$LINE" ) | crontab -
+( crontab -l 2>/dev/null | grep -v "$MARKER" || true; echo "$CRON_LINE" ) | crontab -
 
 echo
-echo "  ✓ installed — runs every 15 minutes"
+echo "  ✓ installed — every 15 minutes, from $RUN_DIR"
 echo "    log:    $LOG"
-echo "    view:   crontab -l | grep 'delivery monitor'"
+echo "    verify: tail -f $LOG     (expect a new line within 15 minutes)"
 echo "    remove: bash scripts/install-monitor-cron.sh --uninstall"
 echo
-echo "  ⚠️  cron only runs while this machine is awake. For real coverage, run"
-echo "     the same command from an always-on host or an uptime service that"
-echo "     can execute a script and alert on a non-zero exit."
+echo "  ⚠️  Re-run this after editing check-delivery.mjs or rotating the licence"
+echo "     key — $RUN_DIR holds a COPY, by design."
+echo "  ⚠️  cron only runs while this machine is awake. A laptop is not"
+echo "     monitoring; use an always-on host for real coverage."
