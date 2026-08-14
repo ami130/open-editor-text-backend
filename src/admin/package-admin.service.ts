@@ -130,10 +130,13 @@ export class PackageAdminService {
    * incoherent package (the DTO checks shape only):
    *   1. isFree ⇒ priceCents=0 AND billingInterval='once' (a paid "free" package
    *      is a contradiction; coerce rather than reject so the admin UI stays simple).
-   *   2. isFree ⇒ publiclyListed=false. Self-serve checkout requires priceCents>0
-   *      (order.service rejects a $0 buy), so a free+listed package would render on
-   *      /pricing with a dead "Buy" button. There is no self-serve free-claim flow,
-   *      so a free package simply cannot be on the public storefront. Coerce it off.
+   *   2. (REMOVED) isFree ⇒ publiclyListed=false. This used to be coerced off
+   *      because /pricing gave every package a "Buy" button and order.service
+   *      rejects a $0 buy, so a free+listed package showed a dead button. The
+   *      storefront now renders free as "Get started" with no checkout path, so
+   *      the free tier can finally be listed — and hiding it meant visitors had
+   *      no way to see a free tier existed. order.service's zero-price refusal
+   *      is untouched and remains the real guard.
    *   3. refreshPolicy is DERIVED from the final billing interval — never trusted
    *      from the client — so it always matches the interval actually stored.
    */
@@ -141,7 +144,20 @@ export class PackageAdminService {
     if (pkg.isFree) {
       pkg.priceCents = 0;
       pkg.billingInterval = 'once';
-      pkg.publiclyListed = false;
+      // NOTE: `publiclyListed` is deliberately NOT forced off here any more.
+      // It used to be, because /pricing rendered every package with a "Buy"
+      // button and order.service rejects a $0 checkout — so a free+listed
+      // package showed a button that could only ever 400.
+      //
+      // The storefront now renders a free package as "Free / Get started"
+      // linking to the docs, with no checkout path, and guards the dialog on
+      // `priceCents > 0`. The dead-button reason is gone, and hiding the free
+      // tier from the pricing page had a real cost: visitors could not see
+      // that a free tier exists at all.
+      //
+      // The actual protection is unchanged and lives where it belongs —
+      // order.service still refuses any zero-price checkout, so even a crafted
+      // request cannot buy a free package.
     }
     const interval = asBillingInterval(pkg.billingInterval) ?? 'once';
     pkg.billingInterval = interval;
