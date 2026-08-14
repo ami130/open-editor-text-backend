@@ -496,8 +496,33 @@ export class DeliverySessionService {
      * fully self-sufficient within one refresh cycle — which is the window the
      * engine change must wait for.
      */
-    const baseline = this.defaultPackage ? this.defaultPackage.featuresForAnonymous() : [];
-    const features = [...new Set([...baseline, ...packageFeatures])];
+    /**
+     * ─── UPDATE: THE PACKAGE IS THE WHOLE TRUTH ─────────────────────────────
+     *
+     * The union above was a MIGRATION BRIDGE, and it did its job: every live
+     * token now carries a full effective grant, so the engine no longer needs
+     * its hardcoded FREE_SET blanket (the loader defaults strictEntitlements on).
+     *
+     * But keeping the union defeats the point of composable packages. Measured:
+     * a package built with exactly `[text.bold, list.bullet]` produced a token
+     * carrying 53 features, because the default package's baseline was unioned
+     * in. An admin could therefore never compose a package BELOW the free tier
+     * — the system behaved as two fixed tiers rather than N packages.
+     *
+     * So a licence now grants EXACTLY what its package lists. `testing bold`
+     * means bold and bullet, and nothing else.
+     *
+     * ⚠️ CONSEQUENCE TO OWN: a package that lists only its premium EXTRAS now
+     * grants only those extras. Production's `Pro` package lists
+     * [export.pdf, export.docx] alone, so a Pro licence would grant two
+     * features and no editing surface at all. Any such package must be
+     * re-composed to list everything it intends to sell — which is the honest
+     * model: what the admin picks is what the customer gets.
+     *
+     * The ANONYMOUS path (above) is unchanged and still resolves the default
+     * package, so `npm install` with no key keeps working exactly as before.
+     */
+    const features = [...new Set(packageFeatures)];
 
     /**
      * STAGE 1 — the served bundle follows what the BUILD supports, not a name.

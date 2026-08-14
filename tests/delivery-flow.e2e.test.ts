@@ -896,15 +896,27 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(pre.headers.get('access-control-allow-origin')).toBe('*');
   });
 
-  it('STAGE 3a: a PAID token carries the free baseline too, so it is self-sufficient', async () => {
-    // WHY THIS MATTERS: today the ENGINE grants its own hardcoded FREE_SET on
-    // top of whatever the token says, which is why a Pro token could list only
-    // ['export.pdf'] and still work. Stage 3 removes that hardcoded layer, so
-    // the token must become self-sufficient BEFORE the engine tightens —
-    // otherwise a paying customer instantly loses every free feature.
+  it('STAGE 3b: a token carries EXACTLY its package — no inherited baseline', async () => {
+    // ─── THIS TEST WAS INVERTED, ON PURPOSE ─────────────────────────────────
     //
-    // Verified against production before writing this: a real premium token
-    // listed ['export.pdf'] alone.
+    // It used to assert the opposite: that a paid token also carried the free
+    // baseline (`free tier ∪ package`). That union was a MIGRATION BRIDGE so a
+    // token would stay self-sufficient once the engine stopped granting its own
+    // hardcoded FREE_SET. The bridge did its job — every live token now carries
+    // a full grant, and the loader defaults strictEntitlements on.
+    //
+    // But keeping it defeated composable packages. Measured on production: a
+    // package built with exactly [text.bold, list.bullet] produced a token
+    // carrying 53 features, because the DEFAULT package's baseline was unioned
+    // in. An admin could never compose a package below the free tier, so the
+    // system behaved as two fixed tiers rather than N packages.
+    //
+    // Now a licence grants exactly what its package lists.
+    //
+    // ⚠️ THE TRAP THIS CREATES, and why the assertion below matters: a package
+    // listing only its premium EXTRAS now grants only those extras. Production's
+    // `Pro` listed [export.pdf, export.docx] alone and would have sold two
+    // features and no editing surface. It was re-composed to list all 55.
     const pkg = await (await post('/admin/packages', {
       name: `Selfsufficient ${Date.now()}`, priceCents: 4900, billingInterval: 'monthly',
       featureIds: ['export.pdf'], domainBound: false,
@@ -921,10 +933,10 @@ describe('delivery §1.1→§1.3 end to end', () => {
 
     // What they bought…
     expect(sess.features).toContain('export.pdf');
-    // …AND the free baseline, so no hardcoded engine layer is needed.
-    expect(sess.features).toContain('text.bold');
-    // Still bounded by what the BUILD supports (T14) — the token cannot
-    // over-promise just because the baseline listed something.
+    // …and NOTHING inherited. text.bold is in the default package and in the
+    // build, so under the old union it appeared here; it must not now.
+    expect(sess.features).not.toContain('text.bold');
+    expect(sess.features).toEqual(['export.pdf']);
     expect(sess.plan).toBe('premium');
   });
 
