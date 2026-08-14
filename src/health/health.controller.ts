@@ -36,6 +36,23 @@ export class HealthController {
       // stays retrievable — losing email costs a convenience, not the product.
       status: db.status === 'down' || delivery.status === 'down' ? 'degraded' : 'ok',
       service: 'open-editor-backend',
+      /**
+       * WHICH backend is this? (Phase 4)
+       *
+       * Every wrong-environment incident on this project was invisible until
+       * something silently did not work: a package built on the local backend
+       * and expected in production; a licence signed by `oe-dev-1` pasted into
+       * a production demo and quietly resolving to the free tier. Nothing ever
+       * announced which backend you were talking to.
+       *
+       * `kid` is the honest identifier — not a label someone can mis-set. It is
+       * the key licences are actually SIGNED with, so if two environments ever
+       * report the same kid, they are not isolated, whatever their names claim.
+       *
+       * Safe to expose publicly: the kid is already in every published bundle
+       * and in /.well-known/jwks.json. The PRIVATE key is never touched here.
+       */
+      environment: this.describeEnvironment(),
       checks: {
         database: db,
         ai: { status: ai.enabled ? 'configured' : 'not-configured' },
@@ -43,6 +60,41 @@ export class HealthController {
         email,
       },
       timestamp: nowIso(),
+    };
+  }
+
+  /**
+   * Identify this backend, for humans and for tooling.
+   *
+   * `name` is advisory — it comes from APP_ENV, or falls back to NODE_ENV, and
+   * a mislabelled deployment is exactly the situation this is meant to catch.
+   * So `kid` is reported alongside it: that is the key licences are signed
+   * with, and it cannot be wrong without the whole environment being wrong.
+   *
+   * `isProduction` drives the admin banner, and getting its DEFAULT right
+   * matters more than the happy path:
+   *
+   *   • APP_ENV set        → it wins, whatever NODE_ENV says. That is how a
+   *                          staging box built from the production image
+   *                          (NODE_ENV=production, as every Node platform sets)
+   *                          still identifies itself as staging.
+   *   • APP_ENV unset      → fall back to NODE_ENV.
+   *
+   * ⚠️ The first draft required APP_ENV === 'production' and treated everything
+   * else as non-production. That reads as the safe default and is not: this
+   * deployment sets NODE_ENV=production and no APP_ENV, so PRODUCTION would
+   * have shown the "you are not on production" banner. A banner that cries wolf
+   * on the real thing trains you to ignore it, which is worse than having none.
+   */
+  private describeEnvironment(): { name: string; isProduction: boolean; kid: string } {
+    const explicit = (process.env.APP_ENV || '').trim().toLowerCase();
+    const nodeEnv = (process.env.NODE_ENV || '').trim().toLowerCase();
+    const name = explicit || nodeEnv || 'unknown';
+    return {
+      name,
+      isProduction: name === 'production' || name === 'prod',
+      // Empty when no signing key is configured — itself worth seeing.
+      kid: (process.env.LICENSE_KID || '').trim(),
     };
   }
 
