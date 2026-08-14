@@ -134,7 +134,35 @@ async function bootstrap() {
   });
 
   const port = parseInt(process.env.PORT || '', 10) || 8787;
-  await app.listen(port);
+
+  /**
+   * EADDRINUSE is almost always "you already have a backend running", usually a
+   * `npm run start:dev` from an earlier terminal. Node's default output for it
+   * is a raw UVExceptionWithHostPort stack trace naming `net.js` internals —
+   * which says nothing about what to do, and has cost real time here more than
+   * once.
+   *
+   * Catch it and say the actual fix. Everything else rethrows untouched: a
+   * different startup failure must not be disguised as a port clash.
+   */
+  try {
+    await app.listen(port);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code !== 'EADDRINUSE') throw err;
+    // eslint-disable-next-line no-console
+    console.error(
+      `\n  ✗ Port ${port} is already in use — a backend is very likely already running.\n\n`
+      + '    See what has it:\n'
+      + `      lsof -nP -iTCP:${port} -sTCP:LISTEN\n\n`
+      + '    Then either stop it:\n'
+      + `      kill $(lsof -tiTCP:${port} -sTCP:LISTEN)\n\n`
+      + '    ...or start this one somewhere else:\n'
+      + `      PORT=${port + 1} npm run start:dev\n\n`
+      + '    If it IS the backend you want, you do not need to start another —\n'
+      + `      curl -s http://127.0.0.1:${port}/health\n`,
+    );
+    process.exit(1);
+  }
   // eslint-disable-next-line no-console
   console.log(
     `[open-editor backend] listening on :${port}`
