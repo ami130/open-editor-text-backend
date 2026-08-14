@@ -22,7 +22,8 @@
     "publish:local": "node scripts/publish-local-bundles.mjs",
     "seed:storefront": "node scripts/seed-local-storefront.mjs",
     "check:delivery": "node scripts/check-delivery.mjs",
-    "dev:status": "node scripts/dev-status.mjs"
+    "dev:status": "node scripts/dev-status.mjs",
+    "sweep:test-licences": "node scripts/sweep-test-licences.mjs"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1108.0",
