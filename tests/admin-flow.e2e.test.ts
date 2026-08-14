@@ -69,6 +69,12 @@ const post = (path: string, body?: unknown, token?: string) =>
   });
 const get = (path: string, token?: string) =>
   fetch(`${base}${path}`, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+const patch = (path: string, body?: unknown, token?: string) =>
+  fetch(`${base}${path}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+    body: body ? JSON.stringify(body) : undefined,
+  });
 
 // A FRESH admin access token — some tests below revoke the admin's sessions
 // (logout/reuse-detection), so tests that must act as admin AFTER those fetch
@@ -418,5 +424,95 @@ describe('RBAC: a limited role is denied a privileged action', () => {
       name: 'X', priceCents: 100, currency: 'USD', billingInterval: 'once', featureIds: ['export.pdf'],
     }, token);
     expect(denied.status).toBe(403);
+  });
+});
+
+describe('per-licence delivery — which engine BUILD one customer receives', () => {
+  /**
+   * Own token, not the shared `adminToken`: earlier tests in this file revoke
+   * the admin's sessions (logout / reuse-detection), so anything running after
+   * them gets a 401 from the shared one. The file's own helper exists for
+   * exactly this — it cost six identical 401s to remember it.
+   */
+  let token: string;
+  beforeAll(async () => { token = await freshAdminToken(); });
+
+  /**
+   * The §1.2 chain is `pin → override → channel default → global default`. All
+   * three per-licence inputs already existed as columns and were already READ
+   * on every session — nothing could WRITE them after issue. So "put this
+   * customer on beta" or "move this customer off a bad build" meant editing the
+   * database by hand: exactly the situation rollback tooling exists to avoid,
+   * and where a typo does the most damage.
+   */
+  async function makeLicence() {
+    const pkg = await (await post('/admin/packages', {
+      name: `Delivery ${Date.now()}`, priceCents: 100, billingInterval: 'yearly',
+      featureIds: ['text.bold'], domainBound: false,
+    }, token)).json();
+    const cust = await (await post('/admin/customers', {
+      name: 'Delivery Co', email: `delivery-${Date.now()}-${Math.floor(Math.random() * 1e6)}@example.com`,
+    }, token)).json();
+    return (await post('/admin/licenses', {
+      customerId: cust.id, packageId: pkg.id, domains: [],
+    }, token)).json();
+  }
+
+  it('moves one licence onto a release channel', async () => {
+    const lic = await makeLicence();
+    const r = await patch(`/admin/licenses/${lic.id}/delivery`, { channel: 'beta' }, token);
+    expect(r.status).toBe(200);
+    expect((await r.json()).channel).toBe('beta');
+  });
+
+  it('rejects a channel outside stable/beta/internal', async () => {
+    const lic = await makeLicence();
+    const r = await patch(`/admin/licenses/${lic.id}/delivery`, { channel: 'nightly' }, token);
+    expect(r.status).toBe(400);
+  });
+
+  it('REFUSES an override with no reason', async () => {
+    // The entity called this "MANDATORY" and nothing enforced it. An
+    // unexplained override rots: someone is moved back to dodge a bug, then
+    // forgotten for years, quietly missing features they pay for.
+    const lic = await makeLicence();
+    const r = await patch(`/admin/licenses/${lic.id}/delivery`,
+      { overrideVersion: '1.2.0' }, token);
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(await r.json())).toMatch(/overrideReason is required/);
+  });
+
+  it('accepts an override WITH a reason, and surfaces it in the list', async () => {
+    // An override nobody can see is an override nobody reviews.
+    const lic = await makeLicence();
+    const r = await patch(`/admin/licenses/${lic.id}/delivery`,
+      { overrideVersion: '1.2.0', overrideReason: 'investigating a render bug' }, token);
+    expect(r.status).toBe(200);
+
+    const list = await (await get('/admin/licenses', token)).json();
+    const rows = Array.isArray(list) ? list : list.items;
+    const row = rows.find((l: { id: string }) => l.id === lic.id);
+    expect(row.overrideVersion).toBe('1.2.0');
+    expect(row.overrideReason).toBe('investigating a render bug');
+    expect(row.channel).toBeDefined();
+  });
+
+  it('clears the reason when the override is cleared', async () => {
+    // A stale reason outliving the thing it explained is worse than none — it
+    // reads as a live justification for a state that no longer exists.
+    const lic = await makeLicence();
+    await patch(`/admin/licenses/${lic.id}/delivery`,
+      { overrideVersion: '1.2.0', overrideReason: 'temporary' }, token);
+    const body = await (await patch(`/admin/licenses/${lic.id}/delivery`,
+      { overrideVersion: '' }, token)).json();
+    expect(body.overrideVersion).toBe('');
+    expect(body.overrideReason).toBe('');
+    expect(body.overrideReviewAt).toBe(0);
+  });
+
+  it('404s for a licence that does not exist', async () => {
+    const r = await patch('/admin/licenses/00000000-0000-0000-0000-000000000000/delivery',
+      { channel: 'beta' }, token);
+    expect(r.status).toBe(404);
   });
 });

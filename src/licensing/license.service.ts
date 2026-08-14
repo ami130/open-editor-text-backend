@@ -341,6 +341,77 @@ export class LicenseService {
   }
 
   /**
+   * Change WHICH ENGINE BUILD one licence receives (§1.2 resolution chain).
+   *
+   * The chain is `pin → override → channel default → global default`, and all
+   * three of its per-licence inputs already existed as columns and were already
+   * READ by session resolution — there was simply no way to WRITE them after
+   * issue. So "put this customer on beta" or "move this customer off a bad
+   * build" required direct database access, which is exactly the situation
+   * rollback tooling exists to avoid.
+   *
+   * Deliberately does NOT re-sign the token. These fields are resolved
+   * server-side on every session, so the change takes effect on the customer's
+   * next page load with no re-issue and no key to re-paste.
+   *
+   * @param patch fields to change; `undefined` leaves a field alone, `''` clears
+   *   it (an empty pin/override means "fall through to the next step").
+   */
+  async setDelivery(
+    licenseId: string,
+    patch: {
+      channel?: string;
+      pinnedVersion?: string;
+      overrideVersion?: string;
+      overrideReason?: string;
+      overrideReviewAt?: number;
+    },
+  ): Promise<LicenseEntity> {
+    const lic = await this.getOrThrow(licenseId);
+
+    if (patch.channel !== undefined) {
+      const allowed = ['stable', 'beta', 'internal'];
+      if (!allowed.includes(patch.channel)) {
+        throw new BadRequestException(`channel must be one of: ${allowed.join(', ')}`);
+      }
+      lic.channel = patch.channel;
+    }
+
+    if (patch.pinnedVersion !== undefined) lic.pinnedVersion = patch.pinnedVersion.trim();
+
+    if (patch.overrideVersion !== undefined) {
+      const next = patch.overrideVersion.trim();
+      /**
+       * An override MUST carry a reason. Unexplained overrides rot: someone is
+       * moved back to dodge a bug, then forgotten for years, quietly missing
+       * features they pay for. The entity comment already called this
+       * "MANDATORY"; nothing enforced it until now.
+       *
+       * Only required when SETTING one — clearing an override needs no excuse.
+       */
+      const reason = (patch.overrideReason ?? lic.overrideReason ?? '').trim();
+      if (next && !reason) {
+        throw new BadRequestException(
+          'overrideReason is required when pinning a licence to a specific version — '
+          + 'an unexplained override is impossible to review later',
+        );
+      }
+      lic.overrideVersion = next;
+      if (!next) {
+        // Clearing the override clears its metadata too, so a stale reason
+        // cannot outlive the thing it explained.
+        lic.overrideReason = '';
+        lic.overrideReviewAt = 0;
+      }
+    }
+
+    if (patch.overrideReason !== undefined) lic.overrideReason = patch.overrideReason.trim();
+    if (patch.overrideReviewAt !== undefined) lic.overrideReviewAt = patch.overrideReviewAt;
+
+    return this.licenses.save(lic);
+  }
+
+  /**
    * Regenerate: revoke the OLD license and mint a brand-new one (new id,
    * new `licId`, new signed token) for the SAME customer/features/domains.
    * Unlike `renew()` (which re-signs the SAME row in place — same id, only

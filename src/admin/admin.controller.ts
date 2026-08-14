@@ -20,7 +20,7 @@ import { normalizeDomains, assertDomainsAcceptable } from '../licensing/domain-p
 import { RbacService } from './rbac.service';
 import { CreatePackageDto, UpdatePackageDto } from './dto/package.dto';
 import { CreateCustomerDto, UpdateCustomerDto } from './dto/customer.dto';
-import { IssueLicenseDto, RenewLicenseDto } from './dto/license.dto';
+import { IssueLicenseDto, RenewLicenseDto, SetLicenseDeliveryDto } from './dto/license.dto';
 import { CreateRoleDto, UpdateRoleDto } from './dto/role.dto';
 import { CreateUserDto, UpdateUserDto } from './dto/user.dto';
 import { LicenseInstallService } from '../delivery/license-install.service';
@@ -204,6 +204,16 @@ export class LicenseAdminController {
        * Public key ID only; never key material.
        */
       kid: l.kid,
+      /**
+       * Which engine BUILD this licence resolves to (§1.2). Surfaced so the
+       * admin list can show a pinned or overridden customer at a glance — an
+       * override that nobody can see is an override nobody reviews.
+       */
+      channel: l.channel,
+      pinnedVersion: l.pinnedVersion,
+      overrideVersion: l.overrideVersion,
+      overrideReason: l.overrideReason,
+      overrideReviewAt: l.overrideReviewAt,
       planName: l.planName,
       planPriceCents: l.planPriceCents,
       planCurrency: l.planCurrency,
@@ -268,6 +278,31 @@ export class LicenseAdminController {
    *  legitimate. Uses license.revoke permission (same reviewer authority). */
   @Post(':id/dismiss-flag') @RequirePermissions('license.revoke')
   dismissFlag(@Param('id') id: string) { return this.licenses.dismissFlag(id); }
+
+  /**
+   * Which engine BUILD this one licence receives — channel, pin, override.
+   *
+   * The §1.2 resolution chain (`pin → override → channel default → global
+   * default`) already READ these three columns on every session; there was no
+   * way to WRITE them after issue. So "put this customer on beta to test 1.3.0"
+   * or "move this customer off a bad build while I investigate" meant editing
+   * the database by hand — the exact thing rollback tooling exists to avoid.
+   *
+   * `license.update` rather than `license.issue`: this changes delivery for an
+   * existing licence, it does not mint or destroy one. It also does NOT re-sign
+   * the token — the fields are resolved server-side per session, so the change
+   * lands on the customer's next page load with nothing to re-paste.
+   *
+   * Pushed like an entitlement change so an open editor picks it up in ~2s
+   * rather than waiting out its refresh timer. Same controller-level seam as
+   * revoke(), for the same dependency-cycle reason.
+   */
+  @Patch(':id/delivery') @RequirePermissions('license.update')
+  async setDelivery(@Param('id') id: string, @Body() dto: SetLicenseDeliveryDto) {
+    const lic = await this.licenses.setDelivery(id, dto);
+    this.pushEntitlementChange(lic?.licId, 'changed');
+    return lic;
+  }
 
   /**
    * Regenerate needs BOTH license.revoke (kills the old one) and
