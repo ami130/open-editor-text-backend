@@ -382,18 +382,68 @@ export class DeliverySessionService {
    * DELIBERATE decision about the customer rather than an honest snag — a
    * lapsed subscription, an unregistered domain, one machine too many, a typo'd
    * key. See RevokedPolicy for why it defaults to the forgiving option.
+   *
+   * ─── THE BUNDLE MUST FOLLOW THE FEATURES HERE TOO ───────────────────────
+   * This returned a hardcoded `plan: FREE_PLAN` even after the anonymous path
+   * learned to derive it. Since `featuresForRefusal` deliberately hands back
+   * the SAME list an anonymous visitor gets, that asymmetry meant a default
+   * package containing premium features gave a stranger 55 and a customer whose
+   * subscription had lapsed only 53 — the intersection quietly dropped what the
+   * free build cannot serve. A paying customer having a bad day ended up worse
+   * off than someone who never paid, which is the same "exactly backwards"
+   * failure this method was written to fix, one layer down.
+   *
+   * So the plan is derived from the features actually granted, through the same
+   * helper the anonymous path uses. `revoked` needs no special case: when the
+   * policy narrows its features, the derivation narrows the bundle to match.
    */
-  private refused(reason: SessionRefusal): {
+  private async refused(
+    reason: SessionRefusal,
+    defaults: { channelDefault?: string | null; globalDefault?: string | null },
+  ): Promise<{
     plan: string; features: string[]; licence: LicenseEntity | null; refusal: SessionRefusal;
-  } {
+  }> {
+    const features = this.defaultPackage
+      ? this.defaultPackage.featuresForRefusal(reason)
+      : [ALL_BUILD_FEATURES];
     return {
-      plan: FREE_PLAN,
-      features: this.defaultPackage
-        ? this.defaultPackage.featuresForRefusal(reason)
-        : [ALL_BUILD_FEATURES],
+      plan: await this.planForDefaultTier(features, defaults),
+      features,
       licence: null,
       refusal: reason,
     };
+  }
+
+  /**
+   * Which BUILD can serve the admin's free tier — shared by the anonymous and
+   * refusal paths so the two can never drift apart again.
+   *
+   * ⚠️ ONLY a DESIGNATED package may escalate. `featuresForAnonymous()` always
+   * returns a usable list, so a cold process or a database outage yields the
+   * built-in MINIMAL_FALLBACK set — seven features no free build is guaranteed
+   * to cover. Deriving from that would push every visitor onto the PREMIUM
+   * bundle at exactly the moment the system is least healthy, giving the export
+   * code away as a side effect of an outage. A resilience path must degrade
+   * toward the cheaper bundle, never the richer one.
+   *
+   * `hasDesignation()` is sync and query-free, reading the same cache the
+   * features came from. (`current()` answers the same question but is async and
+   * costs two queries — R1/T17 forbids that here.)
+   */
+  private async planForDefaultTier(
+    features: string[],
+    defaults: { channelDefault?: string | null; globalDefault?: string | null },
+  ): Promise<string> {
+    if (this.deliveryCfg?.anonymousFreeBundleOnly) return FREE_PLAN;
+    if (!this.defaultPackage?.hasDesignation()) return FREE_PLAN;
+
+    // Threaded in rather than looked up: the plan must be decided against the
+    // very build the version chain is about to resolve, and a second lookup
+    // could disagree if a default moved in between.
+    const versionForPlan = defaults.channelDefault || defaults.globalDefault;
+    return versionForPlan
+      ? this.versions.planForFeatures(versionForPlan, features)
+      : FREE_PLAN;
   }
 
   /**
@@ -466,45 +516,16 @@ export class DeliverySessionService {
       : [ALL_BUILD_FEATURES];
 
     // The kill switch short-circuits BEFORE the lookup: when it is on there is
-    // no decision to make, so there is no reason to pay for the query.
-    if (this.deliveryCfg?.anonymousFreeBundleOnly) {
-      return { plan: FREE_PLAN, features, licence: null, refusal: undefined };
-    }
-
-    /**
-     * ⚠️ ONLY a DESIGNATED package may escalate the bundle.
-     *
-     * `featuresForAnonymous()` has two failure modes that both return a usable
-     * list without an admin having chosen it: a cold process with no cache, and
-     * a database outage before anything was ever cached. Both yield the
-     * built-in MINIMAL_FALLBACK set — seven features that no free build is
-     * guaranteed to cover — so feeding that to `planForFeatures` would escalate
-     * every anonymous visitor onto the PREMIUM bundle at exactly the moment the
-     * system is least healthy. A resilience path must not give the export code
-     * away; it must degrade toward the cheaper bundle, never the richer one.
-     *
-     * So escalation requires a package the admin actually designated. Without
-     * one we serve free and let T14 bound the token, which is precisely the
-     * behaviour that shipped before this method existed.
-     *
-     * `hasDesignation()` reads the same cache as the features above — sync and
-     * query-free. (`current()` answers the same question but is async and costs
-     * two queries, which is exactly what this path may not spend.)
-     */
-    if (!this.defaultPackage?.hasDesignation()) {
-      return { plan: FREE_PLAN, features, licence: null, refusal: undefined };
-    }
-
-    // Anonymous callers have no pin and no override, so the version is whatever
-    // the already-resolved defaults point at — threaded in rather than looked up
-    // again, exactly as the licensed path does, so the plan is decided against
-    // the same build the version chain is about to resolve.
-    const versionForPlan = defaults.channelDefault || defaults.globalDefault;
-    const plan = versionForPlan
-      ? await this.versions.planForFeatures(versionForPlan, features)
-      : FREE_PLAN;
-
-    return { plan, features, licence: null, refusal: undefined };
+    // Anonymous callers have no pin and no override, so the bundle is decided
+    // purely by what the admin's tier grants — the same helper the refusal
+    // paths use, so an unlicensed visitor and a lapsed customer can never be
+    // served different builds for the same feature list.
+    return {
+      plan: await this.planForDefaultTier(features, defaults),
+      features,
+      licence: null,
+      refusal: undefined,
+    };
   }
 
   /**
@@ -523,21 +544,21 @@ export class DeliverySessionService {
     refusal?: SessionRefusal;
   }> {
     const claims = this.signer.verifyOwnToken(req.licenceKey as string);
-    if (!claims) return this.refused('invalid-key');
+    if (!claims) return this.refused('invalid-key', req);
 
     const licence = await this.licences.findOne({
       where: { licId: claims.lic },
       relations: ['package', 'package.features', 'customer'],
     });
-    if (!licence) return this.refused('invalid-key');
+    if (!licence) return this.refused('invalid-key', req);
     if (licence.status === 'revoked') {
-      return this.refused('revoked');
+      return this.refused('revoked', req);
     }
     if (licence.isExpired()) {
-      return this.refused('expired');
+      return this.refused('expired', req);
     }
     if (!this.originAllowed(req.origin, licence.domains)) {
-      return this.refused('origin-blocked');
+      return this.refused('origin-blocked', req);
     }
 
     // §2.4 — SEAT CAP. Last of the checks, deliberately: an invalid, revoked,
@@ -551,7 +572,7 @@ export class DeliverySessionService {
     if (cap > 0 && this.installs) {
       const seat = await this.installs.check(licence.licId, req.installId ?? null, req.origin ?? null, cap);
       if (!seat.allowed) {
-        return this.refused('install-cap');
+        return this.refused('install-cap', req);
       }
     }
 

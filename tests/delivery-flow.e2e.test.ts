@@ -1052,6 +1052,48 @@ describe('delivery §1.1→§1.3 end to end', () => {
     }
   });
 
+  it('STAGE 2c: a REFUSED licence gets the same bundle as a stranger, not a worse one', async () => {
+    // Found by re-auditing the change that made the anonymous path derive its
+    // bundle. `featuresForRefusal` deliberately returns the SAME list an
+    // anonymous visitor gets — but `refused()` still hardcoded plan 'free', so
+    // with a premium-granting default package a stranger received 55 features
+    // and a customer whose subscription had lapsed received 53. The intersection
+    // quietly dropped what the free build cannot serve.
+    //
+    // A paying customer having a bad day must never end up worse off than
+    // someone who never paid.
+    const priorDefault = (await (await get('/admin/packages/default/current', adminToken)).json())
+      ?.packageId ?? null;
+
+    const rich = await (await post('/admin/packages', {
+      name: `Rich Free ${Date.now()}`, priceCents: 0, billingInterval: 'once',
+      featureIds: ['text.bold', 'export.pdf'], isFree: true, domainBound: false,
+    }, adminToken)).json();
+    expect((await post('/admin/packages/default', {
+      packageId: rich.id, reason: 'e2e: refusal parity',
+    }, adminToken)).status).toBe(201);
+
+    const stranger = await (await post('/delivery/session', {})).json();
+    // A key that fails verification → the 'invalid-key' refusal path.
+    const lapsed = await (await post('/delivery/session', {
+      licenceKey: 'not-a-real-signed-token',
+    })).json();
+
+    expect(stranger.plan).toBe('premium');
+    // The refused caller must land on the SAME build…
+    expect(lapsed.plan).toBe(stranger.plan);
+    expect(lapsed.engine.key).toBe(stranger.engine.key);
+    // …and therefore keep the feature the free build could not have served.
+    expect(lapsed.features).toContain('export.pdf');
+    expect(lapsed.features.length).toBe(stranger.features.length);
+
+    if (priorDefault) {
+      expect((await post('/admin/packages/default', {
+        packageId: priorDefault, reason: 'e2e: restore after refusal-parity test',
+      }, adminToken)).status).toBe(201);
+    }
+  });
+
   it('STAGE 2c: a modest default package still gets the CHEAP bundle — no over-serving', async () => {
     // The other half of the contract, and the one a naive "just always send
     // premium" fix would break. Escalation must be driven by what the package
