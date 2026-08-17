@@ -127,8 +127,25 @@ if (LICENCE_KEY) {
   try {
     const lic = await session(LICENCE_KEY);
     const f = lic.features || [];
-    if (lic.plan === 'premium' && f.length > (anon?.features?.length ?? 0)) {
-      pass('licence resolves to premium', `plan=${lic.plan} features=${f.length} bundle=${lic.engine?.key}`);
+    const anonCount = anon?.features?.length ?? 0;
+    /**
+     * ⚠️ "MORE than anonymous" is NOT the property to test.
+     *
+     * It was, while the free tier was always the smaller set. Now the admin
+     * chooses it: designate a package granting everything and a licence
+     * correctly adds nothing, so a strict `>` reports a HEALTHY system as
+     * broken — which it did, the first time a 55-feature package became the
+     * default. A monitor that cries wolf when an admin exercises a supported
+     * setting trains you to ignore it.
+     *
+     * What must hold is that the licence is not being REFUSED and resolves to a
+     * plan that can serve what it grants. Whether that is more than the free
+     * tier is the admin's business, not this script's.
+     */
+    if (lic.plan === 'premium' && !lic.refusal && f.length >= anonCount) {
+      pass('licence resolves to premium',
+        `plan=${lic.plan} features=${f.length} bundle=${lic.engine?.key}`
+        + (f.length === anonCount ? ' (free tier grants the same — admin\'s choice)' : ''));
     } else {
       fail('licence resolves to premium',
         `plan=${lic.plan} features=${f.length} refusal=${lic.refusal ?? 'none'} — a paying customer is being served the free tier`);
