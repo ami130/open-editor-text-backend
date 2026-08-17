@@ -1010,6 +1010,77 @@ describe('delivery §1.1→§1.3 end to end', () => {
     expect(Array.isArray(msg) ? msg.join(' ') : String(msg)).toMatch(/unknown package/i);
   });
 
+  it('STAGE 2c: the default package decides the BUNDLE, not just the feature list', async () => {
+    // THE BUG THIS EXISTS FOR. The anonymous path hardcoded `plan: 'free'`, so
+    // features came from the admin's package but the BUNDLE never did.
+    // Designating a package that grants export.pdf produced a session promising
+    // it on a free build with no export code, and the T14 intersection then
+    // silently dropped it: the panel said one thing, the visitor got another,
+    // and nothing surfaced the difference.
+    //
+    // The fixture's free build supports [text.bold, text.italic]; only premium
+    // adds export.pdf (see buildPayload). So a package granting export.pdf can
+    // only be honoured by the premium bundle.
+    // ⚠️ Remember what was designated. This test mutates GLOBAL state that
+    // every later test reads; the suite already carries a scar from exactly
+    // this (see the RESTORE note in the empty-guard test, which broke 2b).
+    const priorDefault = (await (await get('/admin/packages/default/current', adminToken)).json())
+      ?.packageId ?? null;
+
+    const premiumish = await (await post('/admin/packages', {
+      name: `Everything Free ${Date.now()}`, priceCents: 0, billingInterval: 'once',
+      featureIds: ['text.bold', 'export.pdf'], isFree: true, domainBound: false,
+    }, adminToken)).json();
+    expect((await post('/admin/packages/default', {
+      packageId: premiumish.id, reason: 'e2e: bundle follows the package',
+    }, adminToken)).status).toBe(201);
+
+    const s = await (await post('/delivery/session', {})).json();
+
+    // The bundle ESCALATED to premium because the free one cannot serve pdf…
+    expect(s.plan).toBe('premium');
+    expect(s.engine.key).toContain('premium');
+    // …and the feature actually survives to the token, which is the whole point:
+    // before this, export.pdf was dropped by the intersection and the admin had
+    // no way to give it away.
+    expect(s.features).toContain('export.pdf');
+
+    if (priorDefault) {
+      expect((await post('/admin/packages/default', {
+        packageId: priorDefault, reason: 'e2e: restore after bundle-escalation test',
+      }, adminToken)).status).toBe(201);
+    }
+  });
+
+  it('STAGE 2c: a modest default package still gets the CHEAP bundle — no over-serving', async () => {
+    // The other half of the contract, and the one a naive "just always send
+    // premium" fix would break. Escalation must be driven by what the package
+    // NEEDS, so a bold-and-italic free tier keeps shipping 600 KB rather than
+    // pushing premium bytes (and the export code inside them) at every visitor
+    // for no benefit.
+    const priorDefault = (await (await get('/admin/packages/default/current', adminToken)).json())
+      ?.packageId ?? null;
+
+    const modest = await (await post('/admin/packages', {
+      name: `Modest Free ${Date.now()}`, priceCents: 0, billingInterval: 'once',
+      featureIds: ['text.bold', 'text.italic'], isFree: true, domainBound: false,
+    }, adminToken)).json();
+    expect((await post('/admin/packages/default', {
+      packageId: modest.id, reason: 'e2e: no over-serving',
+    }, adminToken)).status).toBe(201);
+
+    const s = await (await post('/delivery/session', {})).json();
+    expect(s.plan).toBe('free');
+    expect(s.engine.key).toContain('free');
+    expect(s.features).not.toContain('export.pdf');
+
+    if (priorDefault) {
+      expect((await post('/admin/packages/default', {
+        packageId: priorDefault, reason: 'e2e: restore after no-over-serving test',
+      }, adminToken)).status).toBe(201);
+    }
+  });
+
   it('STAGE 2: the designated package cannot be emptied, and edits apply instantly', async () => {
     // TWO properties, and I was wrong about which layer enforces the first.
     // I believed update() could empty an already-designated package. In fact

@@ -63,6 +63,24 @@ export interface DeliveryConfig {
    */
   urlTtlSeconds: number;
   /**
+   * Force unlicensed visitors onto the FREE bundle, whatever the admin's
+   * default package contains.
+   *
+   * The anonymous plan is normally DERIVED from that package (the same
+   * `planForFeatures` the licensed path uses), so designating a package that
+   * grants `export.pdf` ships the premium bundle — with the export code in it —
+   * to every anonymous visitor. That is the admin's call to make, and the
+   * confirm step names it.
+   *
+   * This exists so the call is REVERSIBLE without a redeploy: if giving that
+   * code away turns out to be commercially wrong, set
+   * `DELIVERY_ANONYMOUS_FREE_BUNDLE_ONLY=true` and every anonymous session is
+   * back on the free bundle within one process restart. Features the free build
+   * cannot serve then drop out through the existing T14 intersection, exactly
+   * as they did before this was configurable.
+   */
+  anonymousFreeBundleOnly: boolean;
+  /**
    * Public origin (or CDN base) the loader should fetch bundles from, e.g.
    * `https://delivery.openeditor.com`. No trailing slash.
    *
@@ -138,6 +156,11 @@ export function loadDeliveryConfig(env: NodeJS.ProcessEnv = process.env): Delive
     urlSigningSecret: secret,
     signingEnabled: secret.length > 0,
     urlTtlSeconds: Number.isFinite(ttl) && ttl > 0 ? ttl : DEFAULT_URL_TTL,
+    // Opt-IN kill switch: absent or anything other than 'true' keeps the
+    // derived behaviour, so an unset variable never silently pins the free
+    // bundle and makes an admin's chosen default look broken.
+    anonymousFreeBundleOnly:
+      (env.DELIVERY_ANONYMOUS_FREE_BUNDLE_ONLY || '').trim().toLowerCase() === 'true',
     // Trailing slashes are stripped so joining is unambiguous — otherwise a
     // value with one produces `https://cdn//engine/…`, which some CDNs treat
     // as a different (and uncached) path.

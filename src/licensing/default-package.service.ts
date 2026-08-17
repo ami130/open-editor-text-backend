@@ -130,6 +130,25 @@ export class DefaultPackageService {
   }
 
   /**
+   * Has an admin actually DESIGNATED a package — synchronously, without a query?
+   *
+   * `featuresForAnonymous()` deliberately always returns a usable list, so its
+   * return value cannot answer this: a cold process and a database outage both
+   * produce the built-in MINIMAL_FALLBACK set, which nobody chose. Callers that
+   * escalate on the strength of the admin's intent (the delivery session picks
+   * the BUNDLE from it) must be able to tell a real designation from a
+   * stand-in, and must do it without touching the database on the hottest path
+   * in the system — `current()` is async and issues two queries, so it is the
+   * wrong tool here.
+   *
+   * Reads the same cache `featuresForAnonymous()` serves from, so the two
+   * cannot disagree. Cold cache → false, which is the safe direction.
+   */
+  hasDesignation(): boolean {
+    return !!this.cache?.packageId;
+  }
+
+  /**
    * What a caller whose licence was REFUSED receives.
    *
    * Four of the five refusals are honest users hitting a snag (lapsed

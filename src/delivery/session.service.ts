@@ -42,6 +42,7 @@ import { hostAllowed } from '../licensing/domain-policy';
 import { LicenseInstallService } from './license-install.service';
 import { WatermarkService } from './watermark.service';
 import { DefaultPackageService } from '../licensing/default-package.service';
+import { DELIVERY_CONFIG, type DeliveryConfig } from '../config/delivery.config';
 
 /** Lifetimes. Session is deliberately short — see the header. */
 export const SESSION_TTL_SECONDS = 15 * 60;
@@ -157,6 +158,10 @@ export class DeliverySessionService {
     // Stage 2a — the admin-defined free tier. @Optional so a deployment without
     // it falls back to the previous sentinel behaviour rather than failing.
     @Optional() private readonly defaultPackage?: DefaultPackageService,
+    // Only `anonymousFreeBundleOnly` is read here. @Optional because every
+    // other dependency on this constructor is, and a missing config must not
+    // stop sessions being issued — absent simply means "derive the plan".
+    @Optional() @Inject(DELIVERY_CONFIG) private readonly deliveryCfg?: DeliveryConfig,
   ) {}
 
   /**
@@ -198,14 +203,7 @@ export class DeliverySessionService {
        * admin's free package or something narrower is a product decision, not a
        * refactor, and is scoped as Stage 2b.
        */
-      : {
-        plan: FREE_PLAN,
-        features: this.defaultPackage
-          ? this.defaultPackage.featuresForAnonymous()
-          : [ALL_BUILD_FEATURES],
-        licence: null,
-        refusal: undefined as SessionRefusal | undefined,
-      };
+      : await this.resolveAnonymous(defaults);
 
     const licence = resolved.licence;
     const delivery = await this.versions.resolveForLicence(
@@ -423,6 +421,93 @@ export class DeliverySessionService {
   /**
    * Validate a licence key and read its entitlements.
    *
+   * What an UNLICENSED visitor receives — features AND bundle, both from the
+   * admin's designated default package.
+   *
+   * ─── WHY THE PLAN IS DERIVED, NOT HARDCODED ─────────────────────────────
+   * This used to return a literal `plan: FREE_PLAN`. The features came from the
+   * admin's package, but the BUNDLE never did — so designating a package that
+   * grants `export.pdf` produced a session promising 55 features on a free
+   * build that contains no export code, and the T14 intersection then silently
+   * dropped the two the admin had deliberately ticked. The panel said 55, the
+   * visitor got 53, and nothing explained the gap.
+   *
+   * `planForFeatures` is the same resolver the LICENSED path already uses: it
+   * picks the CHEAPEST build that supports everything the package grants. A
+   * bold-and-bullets package still resolves to the free bundle — nobody is
+   * pushed onto premium bytes they have no use for.
+   *
+   * ─── THE TRADE-OFF THIS MAKES EXPLICIT ──────────────────────────────────
+   * When the default package DOES grant premium features, every anonymous
+   * visitor now downloads the premium bundle — the export implementations
+   * included. That is the admin's decision to make and the panel says so at the
+   * moment it is made; `DELIVERY_ANONYMOUS_FREE_BUNDLE_ONLY=true` reverses it
+   * without a redeploy.
+   *
+   * ─── WHAT MUST NOT REGRESS ──────────────────────────────────────────────
+   * `featuresForAnonymous()` stays CACHE-FIRST (R1/T17): it is synchronous, is
+   * never awaited on a database, and keeps serving its last known good list
+   * through an outage. The one added await is `planForFeatures`, which resolves
+   * against the version registry the caller is ALREADY querying on this path —
+   * a query alongside existing ones, not a new dependency on the hot path. With
+   * no version resolvable it falls back to FREE, because over-serving an
+   * anonymous visitor costs bandwidth for features the token will not carry.
+   */
+  private async resolveAnonymous(
+    defaults: { channelDefault?: string | null; globalDefault?: string | null },
+  ): Promise<{
+    plan: string;
+    features: string[];
+    licence: null;
+    refusal: SessionRefusal | undefined;
+  }> {
+    const features = this.defaultPackage
+      ? this.defaultPackage.featuresForAnonymous()
+      : [ALL_BUILD_FEATURES];
+
+    // The kill switch short-circuits BEFORE the lookup: when it is on there is
+    // no decision to make, so there is no reason to pay for the query.
+    if (this.deliveryCfg?.anonymousFreeBundleOnly) {
+      return { plan: FREE_PLAN, features, licence: null, refusal: undefined };
+    }
+
+    /**
+     * ⚠️ ONLY a DESIGNATED package may escalate the bundle.
+     *
+     * `featuresForAnonymous()` has two failure modes that both return a usable
+     * list without an admin having chosen it: a cold process with no cache, and
+     * a database outage before anything was ever cached. Both yield the
+     * built-in MINIMAL_FALLBACK set — seven features that no free build is
+     * guaranteed to cover — so feeding that to `planForFeatures` would escalate
+     * every anonymous visitor onto the PREMIUM bundle at exactly the moment the
+     * system is least healthy. A resilience path must not give the export code
+     * away; it must degrade toward the cheaper bundle, never the richer one.
+     *
+     * So escalation requires a package the admin actually designated. Without
+     * one we serve free and let T14 bound the token, which is precisely the
+     * behaviour that shipped before this method existed.
+     *
+     * `hasDesignation()` reads the same cache as the features above — sync and
+     * query-free. (`current()` answers the same question but is async and costs
+     * two queries, which is exactly what this path may not spend.)
+     */
+    if (!this.defaultPackage?.hasDesignation()) {
+      return { plan: FREE_PLAN, features, licence: null, refusal: undefined };
+    }
+
+    // Anonymous callers have no pin and no override, so the version is whatever
+    // the already-resolved defaults point at — threaded in rather than looked up
+    // again, exactly as the licensed path does, so the plan is decided against
+    // the same build the version chain is about to resolve.
+    const versionForPlan = defaults.channelDefault || defaults.globalDefault;
+    const plan = versionForPlan
+      ? await this.versions.planForFeatures(versionForPlan, features)
+      : FREE_PLAN;
+
+    return { plan, features, licence: null, refusal: undefined };
+  }
+
+  /**
    * IMPORTANT — the PACKAGE is the source of truth for features, not the
    * licence's stored `features` snapshot (T14). The snapshot records what was
    * sold and when; using it as the live gate means a customer never receives
